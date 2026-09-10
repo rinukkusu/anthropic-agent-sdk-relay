@@ -1,0 +1,34 @@
+# Drop the relay onto the same network as n8n. It is never published to the
+# host: only containers on this network can reach it.
+services:
+  relay:
+    build: .
+    restart: unless-stopped
+    environment:
+      RELAY_API_KEY: ${RELAY_API_KEY:?set RELAY_API_KEY in .env}
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:?run `claude setup-token` and put the result in .env}
+      RELAY_SESSION_TTL_MS: 600000
+      RELAY_MAX_SESSIONS: 32
+    networks: [n8n]
+    # Alternative to CLAUDE_CODE_OAUTH_TOKEN: mount a logged-in credential store
+    # instead. Read-write, because the CLI refreshes the token in place.
+    # volumes:
+    #   - ${HOME}/.claude:/home/bun/.claude
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    restart: unless-stopped
+    ports: ["5678:5678"]
+    environment:
+      # Point the Anthropic credential's base URL at http://relay:8787
+      N8N_SECURE_COOKIE: "false"
+    volumes:
+      - n8n_data:/home/node/.n8n
+    networks: [n8n]
+    depends_on: [relay]
+
+networks:
+  n8n:
+
+volumes:
+  n8n_data:
