@@ -10,6 +10,7 @@ import { errorResponse } from "./relay/anthropic.ts";
 import { SessionStore } from "./relay/session.ts";
 import { handleMessages } from "./routes/messages.ts";
 import { handleModels } from "./routes/models.ts";
+import { normalizePath } from "./routes/path.ts";
 
 const config = loadConfig();
 const store = new SessionStore(config);
@@ -41,9 +42,9 @@ const server = Bun.serve({
   hostname: config.host,
   idleTimeout: 255,
   async fetch(request) {
-    const url = new URL(request.url);
+    const path = normalizePath(new URL(request.url).pathname);
 
-    if (url.pathname === "/health") {
+    if (path === "/health") {
       return Response.json({ status: "ok", sessions: store.size });
     }
 
@@ -51,15 +52,15 @@ const server = Bun.serve({
       return errorResponse(401, "authentication_error", "Invalid or missing API key.");
     }
 
-    if (url.pathname === "/v1/models" && request.method === "GET") {
+    if (path === "/v1/models" && request.method === "GET") {
       return handleModels(config);
     }
 
-    if (url.pathname === "/v1/messages" && request.method === "POST") {
+    if (path === "/v1/messages" && request.method === "POST") {
       return handleMessages(request, { config, store });
     }
 
-    return errorResponse(404, "not_found_error", `No route for ${request.method} ${url.pathname}`);
+    return errorResponse(404, "not_found_error", `No route for ${request.method} ${path}`);
   },
 });
 
