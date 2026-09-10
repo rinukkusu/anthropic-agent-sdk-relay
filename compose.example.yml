@@ -2,7 +2,9 @@
 # host: only containers on this network can reach it.
 services:
   relay:
-    build: .
+    image: ghcr.io/rinukkusu/anthropic-agent-sdk-relay:latest
+    # ...or build it yourself instead:
+    # build: .
     restart: unless-stopped
     environment:
       RELAY_API_KEY: ${RELAY_API_KEY:?set RELAY_API_KEY in .env}

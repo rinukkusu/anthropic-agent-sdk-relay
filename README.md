@@ -43,6 +43,12 @@ cp .env.example .env   # set RELAY_API_KEY
 bun run start
 ```
 
+Or pull the published image, built for amd64 and arm64 on every push to `main`:
+
+```bash
+docker run --rm -p 8787:8787 --env-file .env ghcr.io/rinukkusu/anthropic-agent-sdk-relay:latest
+```
+
 ```bash
 curl http://127.0.0.1:8787/v1/messages -H "x-api-key: $RELAY_API_KEY" -H 'content-type: application/json' -d '{"model":"claude-sonnet-5","max_tokens":256,"messages":[{"role":"user","content":"pong?"}]}'
 ```

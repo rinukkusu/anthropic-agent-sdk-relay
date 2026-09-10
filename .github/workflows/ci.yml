@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bunx tsc --noEmit
+
+      # Unit tests and the integration test run against a scripted Agent SDK,
+      # so nothing here spends subscription tokens. The end-to-end checks in
+      # scripts/smoke.ts need real credentials and stay a local step.
+      - name: Test
+        run: bun test
