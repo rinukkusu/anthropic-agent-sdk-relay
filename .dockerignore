@@ -1,0 +1,13 @@
+# Never let credentials into the build context.
+.env
+.env.*
+!.env.example
+
+node_modules
+.git
+.github
+test
+*.md
+compose*.yml
+Dockerfile
+.dockerignore
