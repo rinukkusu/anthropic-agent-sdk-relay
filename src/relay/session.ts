@@ -34,6 +34,22 @@ export class RelayError extends Error {
   }
 }
 
+/** Structural (JSON) equality, used to disambiguate same-name tool calls. */
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== typeof b || a === null || b === null) return false;
+  if (typeof a !== "object") return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((item, i) => deepEqual(item, b[i]));
+  }
+  const ao = a as Record<string, unknown>;
+  const bo = b as Record<string, unknown>;
+  const keys = Object.keys(ao);
+  if (keys.length !== Object.keys(bo).length) return false;
+  return keys.every((key) => key in bo && deepEqual(ao[key], bo[key]));
+}
+
 type ParkedCall = {
   id: string;
   clientName: string;
@@ -141,17 +157,26 @@ export class Session {
   ): Promise<ToolCallResult> => {
     return new Promise<ToolCallResult>((resolve) => {
       // The assistant message announcing this call usually lands first, but the
-      // MCP call arrives on its own channel, so either order is possible.
-      const announced = [...this.parked.values()].find(
+      // MCP call arrives on its own channel, so either order is possible. When
+      // the model emits several calls to the same tool in one turn, match on the
+      // input too so parallel calls never cross their results; fall back to
+      // clientName-only matching only when nothing matches on input.
+      const announcedCandidates = [...this.parked.values()].filter(
         (call) => call.clientName === clientName && !call.resolve && !call.result,
       );
+      const announced =
+        announcedCandidates.find((call) => deepEqual(call.input, input)) ??
+        announcedCandidates[0];
       if (announced) {
         announced.resolve = resolve;
         return;
       }
-      const delivered = [...this.parked.values()].find(
+      const deliveredCandidates = [...this.parked.values()].filter(
         (call) => call.clientName === clientName && call.result && !call.resolve,
       );
+      const delivered =
+        deliveredCandidates.find((call) => deepEqual(call.input, input)) ??
+        deliveredCandidates[0];
       if (delivered) {
         delivered.resolve = resolve;
         resolve(delivered.result!);
@@ -327,7 +352,14 @@ export class Session {
 
   /** Register an announced call, matching any MCP handler that arrived first. */
   private park(call: ParkedCall): void {
-    const index = this.waiting.findIndex((w) => w.clientName === call.clientName);
+    // Prefer a waiting handler whose input matches this call, so parallel
+    // same-name calls bind to the right one; fall back to clientName-only.
+    let index = this.waiting.findIndex(
+      (w) => w.clientName === call.clientName && deepEqual(w.input, call.input),
+    );
+    if (index < 0) {
+      index = this.waiting.findIndex((w) => w.clientName === call.clientName);
+    }
     if (index >= 0) {
       call.resolve = this.waiting.splice(index, 1)[0]!.resolve;
     }
