@@ -239,9 +239,11 @@ export class Session {
     this.turn = turn;
     this.lastUsed = Date.now();
 
+    let matched = 0;
     for (const result of results) {
       const call = this.parked.get(result.tool_use_id);
       if (!call) continue;
+      matched += 1;
       const payload: ToolCallResult = {
         content: [{ type: "text", text: result.content }],
         isError: result.is_error,
@@ -252,6 +254,17 @@ export class Session {
       } else {
         call.result = payload;
       }
+    }
+    // Nothing matched: the SDK loop was never unblocked, so this turn would hang
+    // forever. Fail it now instead of leaving the client to time out.
+    if (matched === 0) {
+      turn.fail(
+        new RelayError(
+          "No parked tool call matched the provided tool_use_id(s).",
+          400,
+          "invalid_request_error",
+        ),
+      );
     }
     return turn.done;
   }

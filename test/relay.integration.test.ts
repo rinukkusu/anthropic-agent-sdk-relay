@@ -449,4 +449,22 @@ describe("POST /v1/messages", () => {
     expect(store.find(["toolu_busy"])).toBe(busy);
     store.closeAll();
   });
+
+  test("resume with an unknown tool_use_id fails the turn instead of hanging", async () => {
+    const stream = resetSdk();
+    const { session } = await parkedSession(stream, "toolu_known", "Graz");
+
+    let caught: unknown;
+    try {
+      await session.resume([
+        { tool_use_id: "toolu_unknown", content: "irrelevant", is_error: false },
+      ]);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(RelayError);
+    expect((caught as InstanceType<typeof RelayError>).status).toBe(400);
+    expect((caught as InstanceType<typeof RelayError>).kind).toBe("invalid_request_error");
+    expect((caught as Error).message).toMatch(/tool_use_id/);
+  });
 });
