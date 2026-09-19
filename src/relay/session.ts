@@ -347,7 +347,10 @@ export class Session {
       }
     }
 
-    if (calls.length > 0) turn.finish("tool_use", calls);
+    if (calls.length > 0) {
+      this.lastUsed = Date.now();
+      turn.finish("tool_use", calls);
+    }
   }
 
   /** Register an announced call, matching any MCP handler that arrived first. */
@@ -364,6 +367,9 @@ export class Session {
       call.resolve = this.waiting.splice(index, 1)[0]!.resolve;
     }
     this.parked.set(call.id, call);
+    // A parked call means the client owns the next round-trip: keep the session
+    // alive for the tool timeout, not just the (shorter) idle TTL.
+    this.lastUsed = Date.now();
   }
 
   private handleResult(turn: Turn, message: Record<string, unknown>): void {

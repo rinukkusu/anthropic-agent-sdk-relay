@@ -96,7 +96,12 @@ export function loadConfig(): Config {
     apiKey,
     models: table,
     defaultModel,
-    sessionTtlMs: num("RELAY_SESSION_TTL_MS", 10 * 60 * 1000),
+    // A parked tool call keeps a session alive for the whole tool timeout, so the
+    // idle TTL must never be shorter or the sweeper would kill a session mid-call.
+    sessionTtlMs: Math.max(
+      num("RELAY_SESSION_TTL_MS", 10 * 60 * 1000),
+      num("RELAY_TOOL_TIMEOUT_MS", 15 * 60 * 1000),
+    ),
     maxSessions: num("RELAY_MAX_SESSIONS", 32),
     toolTimeoutMs: num("RELAY_TOOL_TIMEOUT_MS", 15 * 60 * 1000),
     cwd: process.env.RELAY_CWD ?? process.cwd(),
