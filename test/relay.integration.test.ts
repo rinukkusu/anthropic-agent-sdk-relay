@@ -423,4 +423,30 @@ describe("POST /v1/messages", () => {
       isError: false,
     });
   });
+
+  test("evictIfFull spares a session with parked calls and drops an idle one", async () => {
+    const stream = resetSdk();
+    const store = new SessionStore({ ...config, maxSessions: 2 });
+
+    // A busy session: has an outstanding parked tool call.
+    const { session: busy } = await parkedSession(stream, "toolu_busy", "Graz");
+    store.add(busy);
+    store.settle(busy); // keeps it: it has a parked call
+    expect(store.find(["toolu_busy"])).toBe(busy);
+
+    // An idle session lingering in the store (added, mid-turn, no parked calls).
+    const idle = new Session({ config, alias, tools: null });
+    store.add(idle);
+    expect(store.size).toBe(2);
+
+    // Adding a third at capacity forces an eviction.
+    const third = new Session({ config, alias, tools: null });
+    store.add(third);
+
+    // The busy session survives; an idle one was sacrificed instead. (The old
+    // by-age rule would have evicted the busy session, which is oldest.)
+    expect(busy.hasParkedCalls).toBe(true);
+    expect(store.find(["toolu_busy"])).toBe(busy);
+    store.closeAll();
+  });
 });

@@ -467,9 +467,12 @@ export class SessionStore {
 
   private evictIfFull(): void {
     while (this.sessions.size >= this.config.maxSessions) {
-      const oldest = [...this.sessions].sort((a, b) => a.lastUsed - b.lastUsed)[0];
-      if (!oldest) return;
-      oldest.close();
+      // Evict idle sessions (no parked calls) oldest-first; only sacrifice a
+      // session with an outstanding tool call when every session is busy.
+      const byAge = [...this.sessions].sort((a, b) => a.lastUsed - b.lastUsed);
+      const victim = byAge.find((s) => !s.hasParkedCalls) ?? byAge[0];
+      if (!victim) return;
+      victim.close();
     }
   }
 
