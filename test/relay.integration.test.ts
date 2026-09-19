@@ -48,10 +48,15 @@ mock.module("@anthropic-ai/claude-agent-sdk", () => ({
 
 let handleMessages: typeof import("../src/routes/messages.ts").handleMessages;
 let SessionStore: typeof import("../src/relay/session.ts").SessionStore;
+let Session: typeof import("../src/relay/session.ts").Session;
+let RelayError: typeof import("../src/relay/session.ts").RelayError;
+let buildToolBridge: typeof import("../src/relay/session.ts").buildToolBridge;
 
 beforeAll(async () => {
   ({ handleMessages } = await import("../src/routes/messages.ts"));
-  ({ SessionStore } = await import("../src/relay/session.ts"));
+  ({ SessionStore, Session, RelayError, buildToolBridge } = await import(
+    "../src/relay/session.ts"
+  ));
 });
 
 const config: Config = {
@@ -99,6 +104,34 @@ const weatherTool = {
     required: ["city"],
   },
 };
+
+const alias = { model: "claude-sonnet-5", tools: [] as string[] };
+
+/** Open a session and drive it until it has one parked tool call. */
+async function parkedSession(
+  stream: AsyncQueue<Record<string, unknown>>,
+  toolUseId: string,
+  city: string,
+) {
+  let session!: InstanceType<typeof Session>;
+  const bridge = buildToolBridge(
+    [weatherTool],
+    (name, input) => session.handleToolCall(name, input),
+    config.toolTimeoutMs,
+  );
+  session = new Session({ config, alias, tools: bridge });
+  const turn = session.start([{ type: "text", text: "Weather?" }]);
+  await Bun.sleep(5);
+  stream.push(
+    assistant([
+      { type: "tool_use", id: toolUseId, name: "mcp__relay__get_weather", input: { city } },
+    ]),
+  );
+  await Bun.sleep(5);
+  const handlerResult = sdk.handlers.get("get_weather")!({ city });
+  await turn;
+  return { session, handlerResult };
+}
 
 describe("POST /v1/messages", () => {
   test("answers a plain prompt and closes the session", async () => {
@@ -334,5 +367,104 @@ describe("POST /v1/messages", () => {
     const response = await handleMessages(post({ messages: [] }), { config, store });
     expect(response.status).toBe(400);
     expect(store.size).toBe(0);
+  });
+
+  test("parallel same-name tool calls with different inputs keep their results straight", async () => {
+    const stream = resetSdk();
+    const store = new SessionStore(config);
+    const messages = [{ role: "user" as const, content: "Weather in Graz and Linz?" }];
+    const pending = handleMessages(
+      post({ model: "claude-sonnet-5", tools: [weatherTool], messages }),
+      { config, store },
+    );
+
+    await Bun.sleep(5);
+    // Two calls to the SAME tool, different inputs, announced together.
+    stream.push(
+      assistant([
+        { type: "tool_use", id: "toolu_graz", name: "mcp__relay__get_weather", input: { city: "Graz" } },
+        { type: "tool_use", id: "toolu_linz", name: "mcp__relay__get_weather", input: { city: "Linz" } },
+      ]),
+    );
+    await Bun.sleep(5);
+    // MCP handlers fire in the OPPOSITE order to the announcement.
+    const linzPromise = sdk.handlers.get("get_weather")!({ city: "Linz" });
+    const grazPromise = sdk.handlers.get("get_weather")!({ city: "Graz" });
+
+    const first = (await (await pending).json()) as Record<string, any>;
+    expect(first.stop_reason).toBe("tool_use");
+
+    void handleMessages(
+      post({
+        model: "claude-sonnet-5",
+        tools: [weatherTool],
+        messages: [
+          ...messages,
+          { role: "assistant", content: first.content },
+          {
+            role: "user",
+            content: [
+              { type: "tool_result", tool_use_id: "toolu_graz", content: "Graz: snow" },
+              { type: "tool_result", tool_use_id: "toolu_linz", content: "Linz: sun" },
+            ],
+          },
+        ],
+      }),
+      { config, store },
+    );
+
+    // Each handler must get its OWN city's result, not the other's.
+    expect(await grazPromise).toEqual({
+      content: [{ type: "text", text: "Graz: snow" }],
+      isError: false,
+    });
+    expect(await linzPromise).toEqual({
+      content: [{ type: "text", text: "Linz: sun" }],
+      isError: false,
+    });
+  });
+
+  test("evictIfFull spares a session with parked calls and drops an idle one", async () => {
+    const stream = resetSdk();
+    const store = new SessionStore({ ...config, maxSessions: 2 });
+
+    // A busy session: has an outstanding parked tool call.
+    const { session: busy } = await parkedSession(stream, "toolu_busy", "Graz");
+    store.add(busy);
+    store.settle(busy); // keeps it: it has a parked call
+    expect(store.find(["toolu_busy"])).toBe(busy);
+
+    // An idle session lingering in the store (added, mid-turn, no parked calls).
+    const idle = new Session({ config, alias, tools: null });
+    store.add(idle);
+    expect(store.size).toBe(2);
+
+    // Adding a third at capacity forces an eviction.
+    const third = new Session({ config, alias, tools: null });
+    store.add(third);
+
+    // The busy session survives; an idle one was sacrificed instead. (The old
+    // by-age rule would have evicted the busy session, which is oldest.)
+    expect(busy.hasParkedCalls).toBe(true);
+    expect(store.find(["toolu_busy"])).toBe(busy);
+    store.closeAll();
+  });
+
+  test("resume with an unknown tool_use_id fails the turn instead of hanging", async () => {
+    const stream = resetSdk();
+    const { session } = await parkedSession(stream, "toolu_known", "Graz");
+
+    let caught: unknown;
+    try {
+      await session.resume([
+        { tool_use_id: "toolu_unknown", content: "irrelevant", is_error: false },
+      ]);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(RelayError);
+    expect((caught as InstanceType<typeof RelayError>).status).toBe(400);
+    expect((caught as InstanceType<typeof RelayError>).kind).toBe("invalid_request_error");
+    expect((caught as Error).message).toMatch(/tool_use_id/);
   });
 });

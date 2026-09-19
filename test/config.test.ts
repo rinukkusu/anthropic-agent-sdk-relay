@@ -59,6 +59,34 @@ describe("loadConfig", () => {
       expect(() => loadConfig()).toThrow(/needs a "model" string/);
     });
   });
+
+  test("floors the session TTL at the tool timeout so parked calls are not swept", () => {
+    // A configured TTL shorter than the tool timeout is raised to the timeout,
+    // so the sweeper never kills a session while a tool call is still parked.
+    withEnv(
+      {
+        RELAY_API_KEY: "secret",
+        RELAY_SESSION_TTL_MS: String(5 * 60 * 1000),
+        RELAY_TOOL_TIMEOUT_MS: String(15 * 60 * 1000),
+      },
+      () => {
+        const config = loadConfig();
+        expect(config.sessionTtlMs).toBe(15 * 60 * 1000);
+        expect(config.sessionTtlMs).toBeGreaterThanOrEqual(config.toolTimeoutMs);
+      },
+    );
+    // A TTL that already exceeds the tool timeout is left untouched.
+    withEnv(
+      {
+        RELAY_API_KEY: "secret",
+        RELAY_SESSION_TTL_MS: String(20 * 60 * 1000),
+        RELAY_TOOL_TIMEOUT_MS: String(15 * 60 * 1000),
+      },
+      () => {
+        expect(loadConfig().sessionTtlMs).toBe(20 * 60 * 1000);
+      },
+    );
+  });
 });
 
 describe("resolveModel", () => {

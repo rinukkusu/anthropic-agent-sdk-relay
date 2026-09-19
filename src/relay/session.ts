@@ -34,6 +34,22 @@ export class RelayError extends Error {
   }
 }
 
+/** Structural (JSON) equality, used to disambiguate same-name tool calls. */
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== typeof b || a === null || b === null) return false;
+  if (typeof a !== "object") return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((item, i) => deepEqual(item, b[i]));
+  }
+  const ao = a as Record<string, unknown>;
+  const bo = b as Record<string, unknown>;
+  const keys = Object.keys(ao);
+  if (keys.length !== Object.keys(bo).length) return false;
+  return keys.every((key) => key in bo && deepEqual(ao[key], bo[key]));
+}
+
 type ParkedCall = {
   id: string;
   clientName: string;
@@ -141,17 +157,26 @@ export class Session {
   ): Promise<ToolCallResult> => {
     return new Promise<ToolCallResult>((resolve) => {
       // The assistant message announcing this call usually lands first, but the
-      // MCP call arrives on its own channel, so either order is possible.
-      const announced = [...this.parked.values()].find(
+      // MCP call arrives on its own channel, so either order is possible. When
+      // the model emits several calls to the same tool in one turn, match on the
+      // input too so parallel calls never cross their results; fall back to
+      // clientName-only matching only when nothing matches on input.
+      const announcedCandidates = [...this.parked.values()].filter(
         (call) => call.clientName === clientName && !call.resolve && !call.result,
       );
+      const announced =
+        announcedCandidates.find((call) => deepEqual(call.input, input)) ??
+        announcedCandidates[0];
       if (announced) {
         announced.resolve = resolve;
         return;
       }
-      const delivered = [...this.parked.values()].find(
+      const deliveredCandidates = [...this.parked.values()].filter(
         (call) => call.clientName === clientName && call.result && !call.resolve,
       );
+      const delivered =
+        deliveredCandidates.find((call) => deepEqual(call.input, input)) ??
+        deliveredCandidates[0];
       if (delivered) {
         delivered.resolve = resolve;
         resolve(delivered.result!);
@@ -214,9 +239,11 @@ export class Session {
     this.turn = turn;
     this.lastUsed = Date.now();
 
+    let matched = 0;
     for (const result of results) {
       const call = this.parked.get(result.tool_use_id);
       if (!call) continue;
+      matched += 1;
       const payload: ToolCallResult = {
         content: [{ type: "text", text: result.content }],
         isError: result.is_error,
@@ -227,6 +254,17 @@ export class Session {
       } else {
         call.result = payload;
       }
+    }
+    // Nothing matched: the SDK loop was never unblocked, so this turn would hang
+    // forever. Fail it now instead of leaving the client to time out.
+    if (matched === 0) {
+      turn.fail(
+        new RelayError(
+          "No parked tool call matched the provided tool_use_id(s).",
+          400,
+          "invalid_request_error",
+        ),
+      );
     }
     return turn.done;
   }
@@ -322,16 +360,29 @@ export class Session {
       }
     }
 
-    if (calls.length > 0) turn.finish("tool_use", calls);
+    if (calls.length > 0) {
+      this.lastUsed = Date.now();
+      turn.finish("tool_use", calls);
+    }
   }
 
   /** Register an announced call, matching any MCP handler that arrived first. */
   private park(call: ParkedCall): void {
-    const index = this.waiting.findIndex((w) => w.clientName === call.clientName);
+    // Prefer a waiting handler whose input matches this call, so parallel
+    // same-name calls bind to the right one; fall back to clientName-only.
+    let index = this.waiting.findIndex(
+      (w) => w.clientName === call.clientName && deepEqual(w.input, call.input),
+    );
+    if (index < 0) {
+      index = this.waiting.findIndex((w) => w.clientName === call.clientName);
+    }
     if (index >= 0) {
       call.resolve = this.waiting.splice(index, 1)[0]!.resolve;
     }
     this.parked.set(call.id, call);
+    // A parked call means the client owns the next round-trip: keep the session
+    // alive for the tool timeout, not just the (shorter) idle TTL.
+    this.lastUsed = Date.now();
   }
 
   private handleResult(turn: Turn, message: Record<string, unknown>): void {
@@ -429,9 +480,12 @@ export class SessionStore {
 
   private evictIfFull(): void {
     while (this.sessions.size >= this.config.maxSessions) {
-      const oldest = [...this.sessions].sort((a, b) => a.lastUsed - b.lastUsed)[0];
-      if (!oldest) return;
-      oldest.close();
+      // Evict idle sessions (no parked calls) oldest-first; only sacrifice a
+      // session with an outstanding tool call when every session is busy.
+      const byAge = [...this.sessions].sort((a, b) => a.lastUsed - b.lastUsed);
+      const victim = byAge.find((s) => !s.hasParkedCalls) ?? byAge[0];
+      if (!victim) return;
+      victim.close();
     }
   }
 
