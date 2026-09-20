@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { AnthropicMessage } from "../src/relay/anthropic.ts";
 import {
+  continuationKey,
+  conversationKey,
   pendingToolResults,
   renderTranscript,
   seedPrompt,
@@ -14,13 +16,23 @@ const conversation: AnthropicMessage[] = [
 ];
 
 describe("seedPrompt", () => {
-  test("puts the current turn after a transcript of the earlier ones", () => {
+  test("renders the whole conversation, current turn included, as one transcript", () => {
     const { content } = seedPrompt(conversation);
-    expect(content).toHaveLength(2);
+    expect(content).toHaveLength(1);
     const transcript = content[0] as unknown as { text: string };
     expect(transcript.text).toContain("Human: What is the capital of Austria?");
     expect(transcript.text).toContain("Assistant: Vienna.");
-    expect(content[1]).toEqual({ type: "text", text: "And its population?" });
+    expect(transcript.text).toContain("Human: And its population?");
+  });
+
+  test("grows append-only, so a cold restart still shares a prefix", () => {
+    const earlier = seedPrompt(conversation.slice(0, 2));
+    const later = seedPrompt(conversation);
+    const a = (earlier.content[0] as unknown as { text: string }).text;
+    const b = (later.content[0] as unknown as { text: string }).text;
+    // Everything up to the end of the previous turn is byte-identical.
+    const shared = a.slice(0, a.indexOf("\n</conversation_history>"));
+    expect(b.startsWith(shared)).toBe(true);
   });
 
   test("skips the transcript entirely for a first turn", () => {
@@ -98,5 +110,29 @@ describe("toolResultText", () => {
     expect(toolResultText([{ type: "text", text: "a" }, { type: "text", text: "b" }])).toBe("a\nb");
     expect(toolResultText({ ok: true })).toBe('{"ok":true}');
     expect(toolResultText(undefined)).toBe("");
+  });
+});
+
+describe("conversation keys", () => {
+  test("a follow-up turn keys onto what the previous request was fed", () => {
+    const first: AnthropicMessage[] = [conversation[0]!];
+    const stored = conversationKey("claude-sonnet-5", undefined, first);
+    expect(continuationKey("claude-sonnet-5", undefined, conversation)).toBe(stored);
+  });
+
+  test("the key covers the model and the system prompt", () => {
+    const a = conversationKey("claude-sonnet-5", "terse", conversation);
+    expect(conversationKey("claude-opus-5", "terse", conversation)).not.toBe(a);
+    expect(conversationKey("claude-sonnet-5", "verbose", conversation)).not.toBe(a);
+  });
+
+  test("a first turn has nothing to continue", () => {
+    expect(continuationKey("claude-sonnet-5", undefined, [conversation[0]!])).toBeNull();
+  });
+
+  test("a trailing assistant turn is not a continuation", () => {
+    expect(
+      continuationKey("claude-sonnet-5", undefined, conversation.slice(0, 2)),
+    ).toBeNull();
   });
 });

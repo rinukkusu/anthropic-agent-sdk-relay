@@ -101,7 +101,7 @@ const weatherTool = {
 };
 
 describe("POST /v1/messages", () => {
-  test("answers a plain prompt and closes the session", async () => {
+  test("answers a plain prompt and holds the session open for the next turn", async () => {
     const stream = resetSdk();
     const store = new SessionStore(config);
 
@@ -118,8 +118,71 @@ describe("POST /v1/messages", () => {
     expect(body.stop_reason).toBe("end_turn");
     expect(body.content).toEqual([{ type: "text", text: "Hello there." }]);
     expect(body.usage).toMatchObject({ input_tokens: 12, output_tokens: 7 });
-    // Nothing is parked, so the session must not linger.
-    expect(store.size).toBe(0);
+    // The session is kept so the follow-up turn does not restart cold.
+    expect(store.size).toBe(1);
+    store.closeAll();
+  });
+
+  test("continues a live session instead of replaying a transcript", async () => {
+    const stream = resetSdk();
+    const store = new SessionStore(config);
+    const first = [{ role: "user" as const, content: "Capital of Austria?" }];
+
+    const firstPending = handleMessages(
+      post({ model: "claude-sonnet-5", messages: first }),
+      { config, store },
+    );
+    await Bun.sleep(5);
+    stream.push(assistant([{ type: "text", text: "Vienna." }]));
+    stream.push(result("Vienna."));
+    await firstPending;
+
+    const opened = sdk.options;
+    const secondPending = handleMessages(
+      post({
+        model: "claude-sonnet-5",
+        messages: [
+          ...first,
+          { role: "assistant", content: [{ type: "text", text: "Vienna." }] },
+          { role: "user", content: "And its population?" },
+        ],
+      }),
+      { config, store },
+    );
+    await Bun.sleep(5);
+    stream.push(assistant([{ type: "text", text: "About 2 million." }]));
+    stream.push(result("About 2 million."));
+
+    const body = (await (await secondPending).json()) as Record<string, any>;
+    expect(body.content[0].text).toContain("2 million");
+    // No second query(): the same SDK session took the turn.
+    expect(sdk.options).toBe(opened);
+    expect(store.size).toBe(1);
+    store.closeAll();
+  });
+
+  test("starts a fresh session when the history does not match a live one", async () => {
+    const stream = resetSdk();
+    const store = new SessionStore(config);
+    const pending = handleMessages(
+      post({
+        model: "claude-sonnet-5",
+        messages: [
+          { role: "user", content: "Capital of Austria?" },
+          { role: "assistant", content: [{ type: "text", text: "Vienna." }] },
+          { role: "user", content: "And its population?" },
+        ],
+      }),
+      { config, store },
+    );
+    await Bun.sleep(5);
+    stream.push(assistant([{ type: "text", text: "About 2 million." }]));
+    stream.push(result("About 2 million."));
+    await pending;
+
+    // Nothing was live, so the conversation is replayed as a transcript.
+    expect(store.size).toBe(1);
+    store.closeAll();
   });
 
   test("passes the client system prompt through and loads no local settings", async () => {
@@ -214,7 +277,8 @@ describe("POST /v1/messages", () => {
     const second = (await (await secondPending).json()) as Record<string, any>;
     expect(second.stop_reason).toBe("end_turn");
     expect(second.content[0].text).toContain("snowing");
-    expect(store.size).toBe(0);
+    expect(store.size).toBe(1);
+    store.closeAll();
   });
 
   test("resolves a tool call whose MCP invocation arrives before the announcement", async () => {

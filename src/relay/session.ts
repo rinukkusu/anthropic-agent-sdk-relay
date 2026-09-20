@@ -107,7 +107,8 @@ export type SessionOptions = {
 };
 
 export class Session {
-  readonly id: string = crypto.randomUUID();
+  /** Fingerprint of the conversation this session has been fed so far. */
+  historyKey: string | null = null;
   lastUsed = Date.now();
 
   private readonly inbox = new AsyncQueue<Record<string, unknown>>();
@@ -128,6 +129,10 @@ export class Session {
 
   get hasParkedCalls(): boolean {
     return this.parked.size > 0;
+  }
+
+  get isOpen(): boolean {
+    return !this.closed;
   }
 
   setOnClose(fn: () => void): void {
@@ -228,6 +233,27 @@ export class Session {
         call.result = payload;
       }
     }
+    return turn.done;
+  }
+
+  /**
+   * Feed a further user turn into a session that is already open.
+   *
+   * The SDK keeps the real conversation, so nothing is replayed and the cached
+   * prefix from the previous turn still stands.
+   */
+  continueWith(content: unknown[], onEvent?: (event: StreamEvent) => void): Promise<TurnOutcome> {
+    if (this.closed || !this.query) {
+      throw new RelayError("Session is no longer open.");
+    }
+    const turn = new Turn(onEvent);
+    this.turn = turn;
+    this.lastUsed = Date.now();
+    this.inbox.push({
+      type: "user",
+      message: { role: "user", content },
+      parent_tool_use_id: null,
+    });
     return turn.done;
   }
 
@@ -374,6 +400,9 @@ export class Session {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    // Sessions now outlive their turns, so the sweeper and the size cap can
+    // reach one mid-turn. Fail it rather than leaving the request hanging.
+    this.turn?.fail(new RelayError("Session closed before the turn completed."));
     for (const call of this.parked.values()) {
       call.resolve?.({ content: [{ type: "text", text: "Session closed." }], isError: true });
     }
@@ -388,6 +417,7 @@ export class Session {
 export class SessionStore {
   private readonly sessions = new Set<Session>();
   private readonly byToolUseId = new Map<string, Session>();
+  private readonly byHistory = new Map<string, Session>();
   private sweeper: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly config: Config) {}
@@ -407,11 +437,27 @@ export class SessionStore {
     this.ensureSweeper();
   }
 
-  /** Called after each turn: keep the session only while a tool call is open. */
-  settle(session: Session): void {
-    if (!session.hasParkedCalls) {
-      session.close();
-      return;
+  /** Find the live session this conversation was last handled by. */
+  findByHistory(key: string): Session | undefined {
+    const session = this.byHistory.get(key);
+    if (!session) return undefined;
+    if (!session.isOpen) {
+      this.byHistory.delete(key);
+      return undefined;
+    }
+    return session;
+  }
+
+  /**
+   * Called after each turn. The session is kept open and indexed so the next
+   * turn of the same conversation rides it instead of replaying a transcript
+   * into a cold one; the TTL sweeper and the size cap reclaim it later.
+   */
+  settle(session: Session, historyKey: string): void {
+    if (session.historyKey !== historyKey) {
+      if (session.historyKey) this.byHistory.delete(session.historyKey);
+      session.historyKey = historyKey;
+      this.byHistory.set(historyKey, session);
     }
     for (const id of session.toolUseIds) this.byToolUseId.set(id, session);
   }
@@ -420,6 +466,9 @@ export class SessionStore {
     this.sessions.delete(session);
     for (const [id, value] of this.byToolUseId) {
       if (value === session) this.byToolUseId.delete(id);
+    }
+    for (const [key, value] of this.byHistory) {
+      if (value === session) this.byHistory.delete(key);
     }
     if (this.sessions.size === 0 && this.sweeper) {
       clearInterval(this.sweeper);

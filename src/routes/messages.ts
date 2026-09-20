@@ -16,7 +16,14 @@ import {
   type StreamEvent,
   type TurnOutcome,
 } from "../relay/session.ts";
-import { pendingToolResults, seedPrompt, toolResultText } from "../relay/translate.ts";
+import {
+  continuationKey,
+  conversationKey,
+  pendingToolResults,
+  seedPrompt,
+  toolResultText,
+  userTurnContent,
+} from "../relay/translate.ts";
 
 export type RouteContext = { config: Config; store: SessionStore };
 
@@ -25,13 +32,20 @@ function messageId(): string {
 }
 
 /**
- * Decide how this request joins the relay's state: resume the session waiting on
- * these tool results, or open a new one.
+ * Decide how this request joins the relay's state, cheapest continuation first:
+ * the session waiting on these tool results, the session that handled this
+ * conversation's earlier turns, or a new one.
  */
 function prepareTurn(
   body: ReturnType<typeof messagesRequestSchema.parse>,
   ctx: RouteContext,
-): { session: Session; run: (onEvent?: (e: StreamEvent) => void) => Promise<TurnOutcome> } {
+): {
+  session: Session;
+  historyKey: string;
+  run: (onEvent?: (e: StreamEvent) => void) => Promise<TurnOutcome>;
+} {
+  const system = systemToString(body.system);
+  const historyKey = conversationKey(body.model, system, body.messages);
   const results = pendingToolResults(body.messages);
   const existing = results.length
     ? ctx.store.find(results.map((result) => result.tool_use_id))
@@ -43,7 +57,17 @@ function prepareTurn(
       content: toolResultText(result.content),
       is_error: result.is_error,
     }));
-    return { session: existing, run: (onEvent) => existing.resume(payload, onEvent) };
+    return { session: existing, historyKey, run: (onEvent) => existing.resume(payload, onEvent) };
+  }
+
+  // A plain next turn of a conversation the relay is still holding open: hand
+  // the SDK only the new user message, so its context — and the cached prefix
+  // that goes with it — survives.
+  const previous = continuationKey(body.model, system, body.messages);
+  const live = previous ? ctx.store.findByHistory(previous) : undefined;
+  if (live) {
+    const content = userTurnContent(body.messages[body.messages.length - 1]!);
+    return { session: live, historyKey, run: (onEvent) => live.continueWith(content, onEvent) };
   }
 
   const alias = resolveModel(ctx.config, body.model);
@@ -60,13 +84,13 @@ function prepareTurn(
   session = new Session({
     config: ctx.config,
     alias,
-    systemPrompt: systemToString(body.system),
+    systemPrompt: system,
     tools: bridge,
   });
   ctx.store.add(session);
 
   const { content } = seedPrompt(body.messages);
-  return { session, run: (onEvent) => session.start(content, onEvent) };
+  return { session, historyKey, run: (onEvent) => session.start(content, onEvent) };
 }
 
 function toResponse(model: string, outcome: TurnOutcome): MessagesResponse {
@@ -197,7 +221,7 @@ export async function handleMessages(request: Request, ctx: RouteContext): Promi
   if (!body.stream) {
     try {
       const outcome = await turn.run();
-      ctx.store.settle(turn.session);
+      ctx.store.settle(turn.session, turn.historyKey);
       return Response.json(toResponse(model, outcome));
     } catch (error) {
       turn.session.close();
@@ -214,7 +238,7 @@ export async function handleMessages(request: Request, ctx: RouteContext): Promi
         // Tool-use blocks are held back and written at the end, so the stream
         // carries the renamed client-facing tool rather than the MCP one.
         const outcome = await turn.run((event) => writer.delta(event));
-        ctx.store.settle(turn.session);
+        ctx.store.settle(turn.session, turn.historyKey);
         for (const block of outcome.content) {
           if (block.type === "tool_use") writer.toolUse(block);
         }

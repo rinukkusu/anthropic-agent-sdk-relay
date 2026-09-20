@@ -117,9 +117,22 @@ Known gaps: `max_tokens`, `temperature`, `top_p`, `top_k`, `stop_sequences` and
 `tool_choice` are accepted and ignored, because the Agent SDK does not expose
 them. Token counts come from the SDK's own accounting and are estimates.
 
-Conversation history is replayed to a new session as a transcript in the opening
-message, since a fresh Agent SDK session cannot have assistant turns injected
-into it. Once a tool call is outstanding the live session carries real context.
+### Sessions and prompt caching
+
+A session is held open after every turn, not just while a tool call is
+outstanding, and is indexed by a fingerprint of the conversation it has been
+fed. A follow-up request whose earlier turns match that fingerprint is handed
+straight to the live session as one new user message, so the Agent SDK keeps its
+real context and the cached prefix from the previous turn still applies. Sessions
+are reclaimed by `RELAY_SESSION_TTL_MS` and `RELAY_MAX_SESSIONS`.
+
+Only when no live session matches — a cold start, an eviction, or a changed
+model or system prompt — is the history replayed as a transcript, since a fresh
+Agent SDK session cannot have assistant turns injected into it. That replay is
+built append-only: a constant preamble, the transcript, a constant suffix, so
+consecutive turns share the longest possible identical prefix. The replay is
+lossy (thinking blocks are dropped, tool calls and results become prose), which
+is another reason to keep sessions alive.
 
 ## Testing
 
