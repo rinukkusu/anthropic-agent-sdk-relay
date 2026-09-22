@@ -183,6 +183,9 @@ export class Session {
         mcpServers: tools ? { [tools.serverName]: tools.server } : undefined,
         includePartialMessages: Boolean(onEvent),
         persistSession: false,
+        // A fixed title skips the CLI's title generation, a second model call
+        // per session that would send the whole replayed history uncached.
+        title: "anthropic-agent-sdk-relay",
         cwd: config.cwd,
         abortController: this.abort,
         env: childEnv(),
