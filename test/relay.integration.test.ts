@@ -79,6 +79,13 @@ function assistant(content: unknown[]): Record<string, unknown> {
   return { type: "assistant", parent_tool_use_id: null, message: { content } };
 }
 
+/** The end of one model message, which may have spanned several assistant messages. */
+const messageStop = {
+  type: "stream_event",
+  parent_tool_use_id: null,
+  event: { type: "message_stop" },
+};
+
 function result(text: string): Record<string, unknown> {
   return {
     type: "result",
@@ -170,6 +177,7 @@ describe("POST /v1/messages", () => {
         },
       ]),
     );
+    stream.push(messageStop);
     await Bun.sleep(5);
     const toolPromise = sdk.handlers.get("get_weather")!({ city: "Graz" });
 
@@ -238,6 +246,7 @@ describe("POST /v1/messages", () => {
         { type: "tool_use", id: "toolu_race", name: "mcp__relay__get_weather", input: { city: "Linz" } },
       ]),
     );
+    stream.push(messageStop);
 
     const first = (await (await pending).json()) as Record<string, any>;
     expect(first.stop_reason).toBe("tool_use");
@@ -260,6 +269,64 @@ describe("POST /v1/messages", () => {
 
     expect(await toolPromise).toEqual({
       content: [{ type: "text", text: "Sunny" }],
+      isError: false,
+    });
+  });
+
+  test("hands out parallel tool calls together and resumes on both results", async () => {
+    const stream = resetSdk();
+    const store = new SessionStore(config);
+    const messages = [{ role: "user" as const, content: "Weather in Graz and Linz?" }];
+    const pending = handleMessages(
+      post({ model: "claude-sonnet-5", tools: [weatherTool], messages }),
+      { config, store },
+    );
+
+    await Bun.sleep(5);
+    // The SDK reports each block as its own assistant message and starts the
+    // first tool before the model's message has ended.
+    stream.push(
+      assistant([
+        { type: "tool_use", id: "toolu_1", name: "mcp__relay__get_weather", input: { city: "Graz" } },
+      ]),
+    );
+    const graz = sdk.handlers.get("get_weather")!({ city: "Graz" });
+    await Bun.sleep(5);
+    stream.push(
+      assistant([
+        { type: "tool_use", id: "toolu_2", name: "mcp__relay__get_weather", input: { city: "Linz" } },
+      ]),
+    );
+    stream.push(messageStop);
+
+    const first = (await (await pending).json()) as Record<string, any>;
+    expect(first.stop_reason).toBe("tool_use");
+    expect(first.content.map((block: { id: string }) => block.id)).toEqual(["toolu_1", "toolu_2"]);
+
+    void handleMessages(
+      post({
+        model: "claude-sonnet-5",
+        tools: [weatherTool],
+        messages: [
+          ...messages,
+          { role: "assistant", content: first.content },
+          {
+            role: "user",
+            content: [
+              { type: "tool_result", tool_use_id: "toolu_1", content: "Snow" },
+              { type: "tool_result", tool_use_id: "toolu_2", content: "Sun" },
+            ],
+          },
+        ],
+      }),
+      { config, store },
+    );
+
+    expect(await graz).toEqual({ content: [{ type: "text", text: "Snow" }], isError: false });
+    // The CLI runs the second tool only after the first returns; its result is
+    // already waiting by then.
+    expect(await sdk.handlers.get("get_weather")!({ city: "Linz" })).toEqual({
+      content: [{ type: "text", text: "Sun" }],
       isError: false,
     });
   });
@@ -295,6 +362,7 @@ describe("POST /v1/messages", () => {
         { type: "tool_use", id: "toolu_s", name: "mcp__relay__get_weather", input: { city: "Graz" } },
       ]),
     );
+    stream.push(messageStop);
 
     const body = await response.text();
     const events = [...body.matchAll(/^event: (.+)$/gm)].map((match) => match[1]);

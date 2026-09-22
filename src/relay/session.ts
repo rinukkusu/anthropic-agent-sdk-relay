@@ -53,6 +53,8 @@ type WaitingHandler = {
 /** Collects one client-visible turn out of the SDK's message stream. */
 class Turn {
   readonly content: OutBlock[] = [];
+  /** Client tool calls announced so far, handed out once the model's message ends. */
+  readonly calls: OutBlock[] = [];
   private usage: Usage = emptyUsage();
   private settled = false;
   private resolveFn!: (outcome: TurnOutcome) => void;
@@ -181,7 +183,9 @@ export class Session {
         allowedTools: [...alias.tools, ...(tools?.allowedTools ?? [])],
         permissionMode: "dontAsk",
         mcpServers: tools ? { [tools.serverName]: tools.server } : undefined,
-        includePartialMessages: Boolean(onEvent),
+        // Always on: `message_stop` is the only signal that the model has
+        // finished announcing a batch of parallel tool calls.
+        includePartialMessages: true,
         persistSession: false,
         // A fixed title skips the CLI's title generation, a second model call
         // per session that would send the whole replayed history uncached.
@@ -282,6 +286,13 @@ export class Session {
   }
 
   private handleStreamEvent(turn: Turn, event: Record<string, unknown>): void {
+    // The SDK reports each content block as its own assistant message, and a
+    // parallel batch of tool calls spans several of them. Hand the batch out only
+    // once the model's message has ended, or the later calls are never seen.
+    if (event?.type === "message_stop") {
+      if (turn.calls.length > 0) turn.finish("tool_use", turn.calls);
+      return;
+    }
     if (event?.type !== "content_block_delta") return;
     const delta = event.delta as Record<string, unknown> | undefined;
     if (!delta) return;
@@ -302,7 +313,6 @@ export class Session {
     const payload = message.message as Record<string, unknown> | undefined;
     const blocks = Array.isArray(payload?.content) ? payload!.content : [];
     const bridge = this.options.tools;
-    const calls: OutBlock[] = [];
 
     for (const raw of blocks as Array<Record<string, unknown>>) {
       if (raw.type === "text" && typeof raw.text === "string") {
@@ -321,11 +331,9 @@ export class Session {
         const id = String(raw.id);
         const input = (raw.input ?? {}) as Record<string, unknown>;
         this.park({ id, clientName, input });
-        calls.push({ type: "tool_use", id, name: clientName, input });
+        turn.calls.push({ type: "tool_use", id, name: clientName, input });
       }
     }
-
-    if (calls.length > 0) turn.finish("tool_use", calls);
   }
 
   /** Register an announced call, matching any MCP handler that arrived first. */
