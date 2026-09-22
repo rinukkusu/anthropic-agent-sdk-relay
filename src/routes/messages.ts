@@ -69,6 +69,15 @@ function prepareTurn(
   return { session, run: (onEvent) => session.start(content, onEvent) };
 }
 
+/** One line per finished turn, so cache behaviour is visible in the logs. */
+function logTurn(ctx: RouteContext, model: string, outcome: TurnOutcome): void {
+  if (ctx.config.logLevel === "error") return;
+  const u = outcome.usage;
+  console.log(
+    `turn ${model} ${outcome.stop_reason}: input=${u.input_tokens} cache_read=${u.cache_read_input_tokens ?? 0} cache_write=${u.cache_creation_input_tokens ?? 0} output=${u.output_tokens}`,
+  );
+}
+
 function toResponse(model: string, outcome: TurnOutcome): MessagesResponse {
   return {
     id: messageId(),
@@ -165,7 +174,7 @@ export class SseWriter {
     this.send("message_delta", {
       type: "message_delta",
       delta: { stop_reason, stop_sequence: null },
-      usage: { output_tokens: usage.output_tokens },
+      usage,
     });
     this.send("message_stop", { type: "message_stop" });
   }
@@ -198,6 +207,7 @@ export async function handleMessages(request: Request, ctx: RouteContext): Promi
     try {
       const outcome = await turn.run();
       ctx.store.settle(turn.session);
+      logTurn(ctx, model, outcome);
       return Response.json(toResponse(model, outcome));
     } catch (error) {
       turn.session.close();
@@ -215,6 +225,7 @@ export async function handleMessages(request: Request, ctx: RouteContext): Promi
         // carries the renamed client-facing tool rather than the MCP one.
         const outcome = await turn.run((event) => writer.delta(event));
         ctx.store.settle(turn.session);
+        logTurn(ctx, model, outcome);
         for (const block of outcome.content) {
           if (block.type === "tool_use") writer.toolUse(block);
         }

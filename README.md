@@ -120,6 +120,12 @@ them. Token counts come from the SDK's own accounting and are estimates.
 Conversation history is replayed to a new session as a transcript in the opening
 message, since a fresh Agent SDK session cannot have assistant turns injected
 into it. Once a tool call is outstanding the live session carries real context.
+The replay is append-only, one block per message with a cache breakpoint after
+the newest, so each new turn reads the earlier ones from the prompt cache rather
+than writing the whole conversation again. That only holds while the client's
+history is append-only too: a memory window that drops the oldest messages, or a
+system prompt that embeds the current time, starts the cache over on every turn.
+Each finished turn logs its `cache_read` and `cache_write` token counts.
 
 ## Testing
 

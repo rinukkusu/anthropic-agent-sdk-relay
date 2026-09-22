@@ -53,66 +53,66 @@ function renderBlock(block: AnyBlock): string {
   }
 }
 
-/**
- * Render the turns before the current one as a transcript.
- *
- * A fresh Agent SDK session cannot have assistant turns injected into it, so
- * earlier exchanges are replayed to the model as text. This only ever runs when
- * a session is being opened; continuations ride the live session and keep their
- * real context.
- */
-export function renderTranscript(messages: AnthropicMessage[]): string {
-  const lines: string[] = [];
-  for (const message of messages) {
-    const rendered = blocksOf(message)
-      .map(renderBlock)
-      .filter((line) => line.trim() !== "")
-      .join("\n");
-    if (!rendered) continue;
-    lines.push(`${message.role === "user" ? "Human" : "Assistant"}: ${rendered}`);
-  }
-  return lines.join("\n\n");
-}
-
 export type SeededPrompt = {
   /** Content blocks for the SDK user message that opens the session. */
   content: AnyBlock[];
 };
 
+const HISTORY_PREAMBLE =
+  "The conversation so far follows, one message per block. Reply to the last Human " +
+  "message as the Assistant, and do not mention this framing.";
+
+function renderMessage(message: AnthropicMessage): AnyBlock | null {
+  const rendered = blocksOf(message)
+    .map(renderBlock)
+    .filter((line) => line.trim() !== "")
+    .join("\n");
+  if (!rendered) return null;
+  return { type: "text", text: `${message.role === "user" ? "Human" : "Assistant"}: ${rendered}` };
+}
+
 /**
- * Build the opening user message for a new session: the last user turn, with
- * any earlier exchanges prepended as a transcript.
+ * Build the opening user message for a new session.
+ *
+ * A session only lives while a tool call is open, so every new user turn from
+ * the client opens a fresh session and replays the history. To keep that replay
+ * cheap, the history is rendered append-only: one block per message, rendered
+ * the same way whether it is the current turn or an earlier one, with a cache
+ * breakpoint after the current turn. The next request then shares every block
+ * up to that breakpoint and reads it from the prompt cache instead of writing
+ * the whole conversation again.
  */
 export function seedPrompt(messages: AnthropicMessage[]): SeededPrompt {
   const last = messages[messages.length - 1];
   const isCurrentUserTurn = last?.role === "user";
   const history = isCurrentUserTurn ? messages.slice(0, -1) : messages;
+  const images = isCurrentUserTurn && last
+    ? blocksOf(last).filter((block) => block.type === "image")
+    : [];
 
-  const content: AnyBlock[] = [];
-  const transcript = renderTranscript(history);
-  if (transcript) {
-    content.push({
-      type: "text",
-      text:
-        "Here is the conversation so far. Continue it naturally; do not mention this transcript.\n\n" +
-        `<conversation_history>\n${transcript}\n</conversation_history>`,
+  let content: AnyBlock[];
+  if (history.length === 0 && isCurrentUserTurn && last) {
+    // A first turn is sent as it came, there is nothing to share with later turns yet.
+    content = blocksOf(last).flatMap((block): AnyBlock[] => {
+      if (block.type === "text" || block.type === "image") return [block];
+      const rendered = renderBlock(block);
+      return rendered ? [{ type: "text", text: rendered }] : [];
     });
-  }
-
-  if (isCurrentUserTurn && last) {
-    for (const block of blocksOf(last)) {
-      if (block.type === "text" || block.type === "image") {
-        content.push(block);
-      } else {
-        const rendered = renderBlock(block);
-        if (rendered) content.push({ type: "text", text: rendered });
-      }
-    }
+  } else {
+    const rendered = messages
+      .map(renderMessage)
+      .filter((block): block is AnyBlock => block !== null);
+    content = rendered.length ? [{ type: "text", text: HISTORY_PREAMBLE }, ...rendered, ...images] : [];
   }
 
   if (content.length === 0) {
-    content.push({ type: "text", text: "Continue." });
+    return { content: [{ type: "text", text: "Continue." }] };
   }
+  // Only this one breakpoint is ours: the CLI adds three more, and the API caps a
+  // request at four, so any the client sent along are dropped.
+  content = content.map(({ cache_control: _, ...block }) => block as AnyBlock);
+  const tail = content.length - 1;
+  content[tail] = { ...content[tail]!, cache_control: { type: "ephemeral" } };
   return { content };
 }
 
