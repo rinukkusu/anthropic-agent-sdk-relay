@@ -306,7 +306,7 @@ export class Session {
   private handleAssistant(turn: Turn, message: Record<string, unknown>): void {
     const error = message.error;
     if (typeof error === "string") {
-      turn.fail(this.assistantError(error));
+      turn.fail(this.assistantError(error, assistantText(message)));
       return;
     }
 
@@ -362,7 +362,7 @@ export class Session {
     turn.finish(message.stop_reason === "max_tokens" ? "max_tokens" : "end_turn");
   }
 
-  private assistantError(error: string): RelayError {
+  private assistantError(error: string, text: string): RelayError {
     switch (error) {
       case "authentication_failed":
       case "oauth_org_not_allowed":
@@ -378,7 +378,11 @@ export class Session {
       case "model_not_found":
         return new RelayError("Unknown model.", 404, "not_found_error");
       default:
-        return new RelayError(`Agent SDK error: ${error}`);
+        // The CLI puts the upstream API error in the message text; without it
+        // an "unknown" error is undiagnosable.
+        return new RelayError(
+          `Agent SDK error: ${error}${text ? ` — ${text}` : ""}${this.stderrTail()}`,
+        );
     }
   }
 
@@ -464,6 +468,17 @@ export class SessionStore {
   get size(): number {
     return this.sessions.size;
   }
+}
+
+/** The text blocks of an SDK assistant message, joined. */
+function assistantText(message: Record<string, unknown>): string {
+  const content = (message.message as { content?: unknown } | undefined)?.content;
+  if (!Array.isArray(content)) return "";
+  return (content as Array<{ type?: unknown; text?: unknown }>)
+    .filter((block) => block?.type === "text" && typeof block.text === "string")
+    .map((block) => block.text as string)
+    .join("\n")
+    .trim();
 }
 
 export { buildToolBridge };

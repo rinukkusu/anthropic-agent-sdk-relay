@@ -69,6 +69,11 @@ function prepareTurn(
   return { session, run: (onEvent) => session.start(content, onEvent) };
 }
 
+/** Failed turns are logged at every level; the client may not show the error. */
+function logFailure(model: string, error: RelayError): void {
+  console.error(`turn ${model} failed (${error.status} ${error.kind}): ${error.message}`);
+}
+
 /** One line per finished turn, so cache behaviour is visible in the logs. */
 function logTurn(ctx: RouteContext, model: string, outcome: TurnOutcome): void {
   if (ctx.config.logLevel === "error") return;
@@ -212,6 +217,7 @@ export async function handleMessages(request: Request, ctx: RouteContext): Promi
     } catch (error) {
       turn.session.close();
       const relay = error instanceof RelayError ? error : new RelayError(String(error));
+      logFailure(model, relay);
       return errorResponse(relay.status, relay.kind, relay.message);
     }
   }
@@ -232,7 +238,9 @@ export async function handleMessages(request: Request, ctx: RouteContext): Promi
         writer.finish(outcome.stop_reason, outcome.usage);
       } catch (error) {
         turn.session.close();
-        writer.error(error instanceof RelayError ? error : new RelayError(String(error)));
+        const relay = error instanceof RelayError ? error : new RelayError(String(error));
+        logFailure(model, relay);
+        writer.error(relay);
       } finally {
         controller.close();
       }
