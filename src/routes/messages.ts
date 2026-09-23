@@ -65,7 +65,7 @@ function prepareTurn(
   });
   ctx.store.add(session);
 
-  const { content } = seedPrompt(body.messages);
+  const { content } = seedPrompt(body.messages, ctx.config.cacheTtl);
   return { session, run: (onEvent) => session.start(content, onEvent) };
 }
 

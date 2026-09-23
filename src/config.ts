@@ -22,6 +22,11 @@ export type Config = {
   toolTimeoutMs: number;
   cwd: string;
   logLevel: "debug" | "info" | "error";
+  /**
+   * Prompt cache TTL for the whole request. The CLI and the relay's own
+   * breakpoint must agree: the API rejects a 1h breakpoint after a 5m one.
+   */
+  cacheTtl: "5m" | "1h";
 };
 
 const DEFAULT_MODELS: Record<string, ModelAlias> = {
@@ -78,6 +83,16 @@ function models(): Record<string, ModelAlias> {
   return out;
 }
 
+function cacheTtl(): Config["cacheTtl"] {
+  // The CLI honours this switch over any TTL it is given, so follow it.
+  if (process.env.FORCE_PROMPT_CACHING_5M) return "5m";
+  const raw = process.env.RELAY_CACHE_TTL ?? "1h";
+  if (raw !== "5m" && raw !== "1h") {
+    throw new Error(`RELAY_CACHE_TTL must be "5m" or "1h", got ${JSON.stringify(raw)}`);
+  }
+  return raw;
+}
+
 export function loadConfig(): Config {
   const apiKey = process.env.RELAY_API_KEY ?? null;
   if (!apiKey && process.env.RELAY_ALLOW_ANONYMOUS !== "1") {
@@ -101,6 +116,7 @@ export function loadConfig(): Config {
     toolTimeoutMs: num("RELAY_TOOL_TIMEOUT_MS", 15 * 60 * 1000),
     cwd: process.env.RELAY_CWD ?? process.cwd(),
     logLevel: (process.env.RELAY_LOG_LEVEL as Config["logLevel"]) ?? "info",
+    cacheTtl: cacheTtl(),
   };
 }
 
@@ -115,7 +131,7 @@ const KEEP_CLAUDE_VARS = /^CLAUDE_CODE_(OAUTH_TOKEN|USE_[A-Z_]+|MAX_OUTPUT_TOKEN
  * channel that does not exist here. Everything Claude-Code-specific is dropped
  * except the credentials and provider switches the SDK genuinely reads.
  */
-export function childEnv(): Record<string, string | undefined> {
+export function childEnv(config: Config): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (key === "CLAUDECODE" || key === "CLAUDE_PID") continue;
@@ -123,6 +139,10 @@ export function childEnv(): Record<string, string | undefined> {
     env[key] = value;
   }
   env.CLAUDE_AGENT_SDK_CLIENT_APP = "anthropic-agent-sdk-relay";
+  // Left to itself the CLI picks a TTL per account state, which need not match
+  // the breakpoint the relay puts in the prompt.
+  env.CLAUDE_CODE_PROMPT_CACHE_TTL = config.cacheTtl;
+  env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL = config.cacheTtl;
   return env;
 }
 

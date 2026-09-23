@@ -82,7 +82,10 @@ function renderMessage(message: AnthropicMessage): AnyBlock | null {
  * up to that breakpoint and reads it from the prompt cache instead of writing
  * the whole conversation again.
  */
-export function seedPrompt(messages: AnthropicMessage[]): SeededPrompt {
+export function seedPrompt(
+  messages: AnthropicMessage[],
+  ttl: "5m" | "1h" = "1h",
+): SeededPrompt {
   const last = messages[messages.length - 1];
   const isCurrentUserTurn = last?.role === "user";
   const history = isCurrentUserTurn ? messages.slice(0, -1) : messages;
@@ -109,10 +112,11 @@ export function seedPrompt(messages: AnthropicMessage[]): SeededPrompt {
     return { content: [{ type: "text", text: "Continue." }] };
   }
   // Only this one breakpoint is ours: the CLI adds three more, and the API caps a
-  // request at four, so any the client sent along are dropped.
+  // request at four, so any the client sent along are dropped. Its TTL must match
+  // the one the CLI uses, or the API rejects a 1h breakpoint after a 5m one.
   content = content.map(({ cache_control: _, ...block }) => block as AnyBlock);
   const tail = content.length - 1;
-  content[tail] = { ...content[tail]!, cache_control: { type: "ephemeral" } };
+  content[tail] = { ...content[tail]!, cache_control: { type: "ephemeral", ttl } };
   return { content };
 }
 

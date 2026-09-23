@@ -192,7 +192,7 @@ export class Session {
         title: "anthropic-agent-sdk-relay",
         cwd: config.cwd,
         abortController: this.abort,
-        env: childEnv(),
+        env: childEnv(config),
         stderr: (data: string) => {
           this.stderr.push(data);
           if (this.stderr.length > 50) this.stderr.shift();

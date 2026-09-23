@@ -45,7 +45,7 @@ describe("seedPrompt", () => {
   test("sends a first turn as it came", () => {
     const { content } = seedPrompt([{ role: "user", content: "Hello" }]);
     expect(content).toEqual([
-      { type: "text", text: "Hello", cache_control: { type: "ephemeral" } },
+      { type: "text", text: "Hello", cache_control: { type: "ephemeral", ttl: "1h" } },
     ]);
   });
 

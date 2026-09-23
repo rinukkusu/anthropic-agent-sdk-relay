@@ -65,6 +65,7 @@ const config: Config = {
   toolTimeoutMs: 60_000,
   cwd: process.cwd(),
   logLevel: "error",
+  cacheTtl: "1h",
 };
 
 function post(body: unknown): Request {
