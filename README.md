@@ -113,9 +113,19 @@ settings from disk.
 | `GET` | `/v1/models` | The alias table, for model pickers. |
 | `GET` | `/health` | Unauthenticated. Reports live session count. |
 
+`output_config.effort` and `thinking` are passed on to the Agent SDK; without
+them the CLI runs at its own default effort with adaptive thinking. An `effort`
+pinned on a model alias wins over the client's.
+
 Known gaps: `max_tokens`, `temperature`, `top_p`, `top_k`, `stop_sequences` and
 `tool_choice` are accepted and ignored, because the Agent SDK does not expose
-them. Token counts come from the SDK's own accounting and are estimates.
+them.
+
+Usage is reported per response, as the API would: the input and cache figures
+of the model call that produced it, so they describe the current context size.
+Agents such as Hermes compress their history when that figure crosses a
+threshold. When a built-in tool makes the relay call the model several times
+in one response, output tokens are summed across those calls.
 
 Conversation history is replayed to a new session as a transcript in the opening
 message, since a fresh Agent SDK session cannot have assistant turns injected

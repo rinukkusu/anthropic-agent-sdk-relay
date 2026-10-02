@@ -3,6 +3,7 @@ import { resolveModel, type Config } from "../config.ts";
 import {
   errorResponse,
   messagesRequestSchema,
+  reasoningControls,
   systemToString,
   type MessagesResponse,
   type OutBlock,
@@ -57,11 +58,15 @@ function prepareTurn(
       )
     : null;
 
+  const { effort, thinking } = reasoningControls(body);
   session = new Session({
     config: ctx.config,
     alias,
     systemPrompt: systemToString(body.system),
     tools: bridge,
+    // An effort the alias pins is the operator's call and beats the client's.
+    effort: alias.effort ?? effort,
+    thinking,
   });
   ctx.store.add(session);
 

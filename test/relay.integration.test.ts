@@ -87,6 +87,18 @@ const messageStop = {
   event: { type: "message_stop" },
 };
 
+function streamEvent(event: Record<string, unknown>): Record<string, unknown> {
+  return { type: "stream_event", parent_tool_use_id: null, event };
+}
+
+/** One model call's usage as the stream reports it: buckets up front, output at the end. */
+function callUsage(input: Record<string, number>, output: number): Record<string, unknown>[] {
+  return [
+    streamEvent({ type: "message_start", message: { usage: { ...input, output_tokens: 1 } } }),
+    streamEvent({ type: "message_delta", usage: { output_tokens: output } }),
+  ];
+}
+
 function result(text: string): Record<string, unknown> {
   return {
     type: "result",
@@ -224,6 +236,116 @@ describe("POST /v1/messages", () => {
     expect(second.stop_reason).toBe("end_turn");
     expect(second.content[0].text).toContain("snowing");
     expect(store.size).toBe(0);
+  });
+
+  test("hands the client each turn's own usage, not the agent loop's running sum", async () => {
+    const stream = resetSdk();
+    const store = new SessionStore(config);
+    const messages = [{ role: "user" as const, content: "Weather in Graz?" }];
+
+    const firstPending = handleMessages(
+      post({ model: "claude-sonnet-5", tools: [weatherTool], messages }),
+      { config, store },
+    );
+    await Bun.sleep(5);
+    for (const event of callUsage({ input_tokens: 5, cache_read_input_tokens: 9000, cache_creation_input_tokens: 100 }, 40)) {
+      stream.push(event);
+    }
+    stream.push(
+      assistant([
+        { type: "tool_use", id: "toolu_usage", name: "mcp__relay__get_weather", input: { city: "Graz" } },
+      ]),
+    );
+    stream.push(messageStop);
+    const first = (await (await firstPending).json()) as Record<string, any>;
+    expect(first.usage).toEqual({
+      input_tokens: 5,
+      output_tokens: 40,
+      cache_read_input_tokens: 9000,
+      cache_creation_input_tokens: 100,
+    });
+
+    const secondPending = handleMessages(
+      post({
+        model: "claude-sonnet-5",
+        tools: [weatherTool],
+        messages: [
+          ...messages,
+          { role: "assistant", content: first.content },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_usage", content: "Snow" }] },
+        ],
+      }),
+      { config, store },
+    );
+    await Bun.sleep(5);
+    void sdk.handlers.get("get_weather")!({ city: "Graz" });
+    await Bun.sleep(5);
+    for (const event of callUsage({ input_tokens: 8, cache_read_input_tokens: 9100, cache_creation_input_tokens: 60 }, 12)) {
+      stream.push(event);
+    }
+    stream.push(assistant([{ type: "text", text: "Snowing." }]));
+    stream.push(streamEvent({ type: "message_stop" }));
+    // The SDK's result sums both calls; that is not this turn's context size.
+    stream.push({
+      ...result("Snowing."),
+      usage: { input_tokens: 13, output_tokens: 52, cache_read_input_tokens: 18100, cache_creation_input_tokens: 160 },
+    });
+
+    const second = (await (await secondPending).json()) as Record<string, any>;
+    expect(second.stop_reason).toBe("end_turn");
+    expect(second.usage).toEqual({
+      input_tokens: 8,
+      output_tokens: 12,
+      cache_read_input_tokens: 9100,
+      cache_creation_input_tokens: 60,
+    });
+  });
+
+  test("passes the client's effort and thinking to the SDK", async () => {
+    const stream = resetSdk();
+    const store = new SessionStore(config);
+    const pending = handleMessages(
+      post({
+        model: "claude-sonnet-5",
+        messages: [{ role: "user", content: "Hi" }],
+        output_config: { effort: "medium" },
+        thinking: { type: "enabled", budget_tokens: 2048 },
+      }),
+      { config, store },
+    );
+    await Bun.sleep(5);
+    stream.push(result("ok"));
+    await pending;
+
+    expect(sdk.options!.effort).toBe("medium");
+    expect(sdk.options!.thinking).toEqual({ type: "enabled", budgetTokens: 2048 });
+  });
+
+  test("lets an alias's pinned effort win and leaves unknown levels at the default", async () => {
+    const pinned: Config = {
+      ...config,
+      models: { cheap: { model: "claude-haiku-4-5", tools: [], effort: "low" } },
+    };
+    let stream = resetSdk();
+    let pending = handleMessages(
+      post({ model: "cheap", messages: [{ role: "user", content: "Hi" }], output_config: { effort: "max" } }),
+      { config: pinned, store: new SessionStore(pinned) },
+    );
+    await Bun.sleep(5);
+    stream.push(result("ok"));
+    await pending;
+    expect(sdk.options!.effort).toBe("low");
+
+    stream = resetSdk();
+    pending = handleMessages(
+      post({ model: "claude-sonnet-5", messages: [{ role: "user", content: "Hi" }], output_config: { effort: "minimal" } }),
+      { config, store: new SessionStore(config) },
+    );
+    await Bun.sleep(5);
+    stream.push(result("ok"));
+    await pending;
+    expect(sdk.options!.effort).toBeUndefined();
+    expect(sdk.options!.thinking).toBeUndefined();
   });
 
   test("resolves a tool call whose MCP invocation arrives before the announcement", async () => {

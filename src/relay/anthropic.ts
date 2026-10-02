@@ -78,6 +78,7 @@ export const messagesRequestSchema = z.object({
   tool_choice: z.unknown().optional(),
   metadata: z.unknown().optional(),
   thinking: z.unknown().optional(),
+  output_config: z.object({ effort: z.unknown().optional() }).passthrough().optional(),
 });
 
 export type MessagesRequest = z.infer<typeof messagesRequestSchema>;
@@ -107,6 +108,37 @@ export type MessagesResponse = {
   stop_sequence: null;
   usage: Usage;
 };
+
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type Effort = (typeof EFFORTS)[number];
+
+/** The Agent SDK's thinking option, which spells the budget in camelCase. */
+export type Thinking =
+  | { type: "adaptive" }
+  | { type: "enabled"; budgetTokens?: number }
+  | { type: "disabled" };
+
+/**
+ * The reasoning controls a client asked for. Left to itself the CLI runs every
+ * request at its own default effort with adaptive thinking, whatever the client
+ * sent, so a client that asks for less pays for more output than it wanted.
+ * Values the SDK would reject are dropped, leaving that control at its default.
+ */
+export function reasoningControls(body: MessagesRequest): { effort?: Effort; thinking?: Thinking } {
+  const requested = body.output_config?.effort;
+  const effort = EFFORTS.find((level) => level === requested);
+
+  const raw = body.thinking as { type?: unknown; budget_tokens?: unknown } | undefined;
+  let thinking: Thinking | undefined;
+  if (raw?.type === "adaptive" || raw?.type === "disabled") {
+    thinking = { type: raw.type };
+  } else if (raw?.type === "enabled") {
+    thinking = typeof raw.budget_tokens === "number"
+      ? { type: "enabled", budgetTokens: raw.budget_tokens }
+      : { type: "enabled" };
+  }
+  return { effort, thinking };
+}
 
 /** Flatten the `system` field into the single string the Agent SDK takes. */
 export function systemToString(system: MessagesRequest["system"]): string | undefined {
