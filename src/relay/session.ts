@@ -241,12 +241,29 @@ export class Session {
     });
 
     void this.pump();
+    this.send(content);
+    return turn.done;
+  }
+
+  /**
+   * Carry on with a session whose last turn ended, by appending the client's new
+   * user message. The session still holds the whole conversation, so nothing is
+   * replayed and every earlier block stays in the prompt cache as it was.
+   */
+  continue(content: unknown[], onEvent?: (event: StreamEvent) => void): Promise<TurnOutcome> {
+    const turn = new Turn(onEvent);
+    this.turn = turn;
+    this.lastUsed = Date.now();
+    this.send(content);
+    return turn.done;
+  }
+
+  private send(content: unknown[]): void {
     this.inbox.push({
       type: "user",
       message: { role: "user", content },
       parent_tool_use_id: null,
     });
-    return turn.done;
   }
 
   /**
@@ -449,10 +466,16 @@ export class Session {
   }
 }
 
-/** Live sessions, indexed by the tool_use ids they are waiting on. */
+/**
+ * Live sessions, indexed by the tool_use ids they are waiting on, or, once a turn
+ * has ended, by the conversation they hold, so the client's next turn can carry
+ * on in the same session instead of replaying the history into a new one.
+ */
 export class SessionStore {
   private readonly sessions = new Set<Session>();
   private readonly byToolUseId = new Map<string, Session>();
+  /** Sessions between turns, by conversation key, oldest first. */
+  private readonly idle = new Map<string, Session>();
   private sweeper: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly config: Config) {}
@@ -472,29 +495,64 @@ export class SessionStore {
     this.ensureSweeper();
   }
 
-  /** Called after each turn: keep the session only while a tool call is open. */
-  settle(session: Session): void {
-    if (!session.hasParkedCalls) {
+  /** Take the session that holds the conversation up to `key`, if one is waiting. */
+  claimIdle(key: string): Session | undefined {
+    const session = this.idle.get(key);
+    if (session) this.idle.delete(key);
+    return session;
+  }
+
+  /**
+   * Called after each turn. A session with an open tool call waits for its
+   * result; one whose turn ended waits under `idleKey` for the next user turn,
+   * while there is room for it. Anything else is closed.
+   */
+  settle(session: Session, idleKey?: string): void {
+    this.unindex(session);
+    if (session.hasParkedCalls) {
+      for (const id of session.toolUseIds) this.byToolUseId.set(id, session);
+      return;
+    }
+    if (idleKey === undefined || this.config.maxIdleSessions <= 0) {
       session.close();
       return;
     }
-    for (const id of session.toolUseIds) this.byToolUseId.set(id, session);
+    this.idle.set(idleKey, session);
+    // Each one is a CLI process of its own, so only a few are kept around.
+    while (this.idle.size > this.config.maxIdleSessions) {
+      this.idle.values().next().value!.close();
+    }
+  }
+
+  private unindex(session: Session): void {
+    for (const [id, value] of this.byToolUseId) {
+      if (value === session) this.byToolUseId.delete(id);
+    }
+    for (const [key, value] of this.idle) {
+      if (value === session) this.idle.delete(key);
+    }
   }
 
   private forget(session: Session): void {
     this.sessions.delete(session);
-    for (const [id, value] of this.byToolUseId) {
-      if (value === session) this.byToolUseId.delete(id);
-    }
+    this.unindex(session);
     if (this.sessions.size === 0 && this.sweeper) {
       clearInterval(this.sweeper);
       this.sweeper = null;
     }
   }
 
+  private isIdle(session: Session): boolean {
+    return [...this.idle.values()].includes(session);
+  }
+
   private evictIfFull(): void {
     while (this.sessions.size >= this.config.maxSessions) {
-      const oldest = [...this.sessions].sort((a, b) => a.lastUsed - b.lastUsed)[0];
+      // A session between turns only saves a replay; one waiting on a tool
+      // result would lose the turn, so idle ones go first.
+      const oldest = [...this.sessions].sort(
+        (a, b) => Number(this.isIdle(b)) - Number(this.isIdle(a)) || a.lastUsed - b.lastUsed,
+      )[0];
       if (!oldest) return;
       oldest.close();
     }
@@ -503,9 +561,10 @@ export class SessionStore {
   private ensureSweeper(): void {
     if (this.sweeper) return;
     this.sweeper = setInterval(() => {
-      const cutoff = Date.now() - this.config.sessionTtlMs;
+      const now = Date.now();
       for (const session of [...this.sessions]) {
-        if (session.lastUsed < cutoff) session.close();
+        const ttl = this.isIdle(session) ? this.config.idleTtlMs : this.config.sessionTtlMs;
+        if (session.lastUsed < now - ttl) session.close();
       }
     }, 30_000);
     this.sweeper.unref?.();
