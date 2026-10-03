@@ -1,6 +1,7 @@
 /**
  * Translation between the Anthropic wire format and what the Agent SDK takes.
  */
+import { createHash } from "node:crypto";
 import type { AnthropicMessage, ContentBlock, Usage } from "./anthropic.ts";
 
 type AnyBlock = Record<string, unknown> & { type: string };
@@ -74,18 +75,17 @@ function renderMessage(message: AnthropicMessage): AnyBlock | null {
 /**
  * Build the opening user message for a new session.
  *
- * A session only lives while a tool call is open, so every new user turn from
- * the client opens a fresh session and replays the history. To keep that replay
- * cheap, the history is rendered append-only: one block per message, rendered
- * the same way whether it is the current turn or an earlier one, with a cache
- * breakpoint after the current turn. The next request then shares every block
- * up to that breakpoint and reads it from the prompt cache instead of writing
- * the whole conversation again.
+ * A session carries on across the client's turns while the history matches, so
+ * a replay is the exception: the start of a conversation, or a history the
+ * client rewrote or the relay no longer holds. It is rendered one block per
+ * message, the same way for every turn.
+ *
+ * The message carries no cache breakpoint of ours. The CLI marks two blocks of
+ * the system prompt and the last two messages of every request, the API refuses
+ * a fifth, and a block in the opening message stays in every later request of
+ * the session. Breakpoints the client sent along are dropped for the same reason.
  */
-export function seedPrompt(
-  messages: AnthropicMessage[],
-  ttl: "5m" | "1h" = "1h",
-): SeededPrompt {
+export function seedPrompt(messages: AnthropicMessage[]): SeededPrompt {
   const last = messages[messages.length - 1];
   const isCurrentUserTurn = last?.role === "user";
   const history = isCurrentUserTurn ? messages.slice(0, -1) : messages;
@@ -95,12 +95,7 @@ export function seedPrompt(
 
   let content: AnyBlock[];
   if (history.length === 0 && isCurrentUserTurn && last) {
-    // A first turn is sent as it came, there is nothing to share with later turns yet.
-    content = blocksOf(last).flatMap((block): AnyBlock[] => {
-      if (block.type === "text" || block.type === "image") return [block];
-      const rendered = renderBlock(block);
-      return rendered ? [{ type: "text", text: rendered }] : [];
-    });
+    content = asSent(last);
   } else {
     const rendered = messages
       .map(renderMessage)
@@ -111,13 +106,44 @@ export function seedPrompt(
   if (content.length === 0) {
     return { content: [{ type: "text", text: "Continue." }] };
   }
-  // Only this one breakpoint is ours: the CLI adds three more, and the API caps a
-  // request at four, so any the client sent along are dropped. Its TTL must match
-  // the one the CLI uses, or the API rejects a 1h breakpoint after a 5m one.
-  content = content.map(({ cache_control: _, ...block }) => block as AnyBlock);
-  const tail = content.length - 1;
-  content[tail] = { ...content[tail]!, cache_control: { type: "ephemeral", ttl } };
-  return { content };
+  return { content: content.map(({ cache_control: _, ...block }) => block as AnyBlock) };
+}
+
+/** A message's text and images as they came, anything else rendered to text. */
+function asSent(message: AnthropicMessage): AnyBlock[] {
+  return blocksOf(message).flatMap((block): AnyBlock[] => {
+    if (block.type === "text" || block.type === "image") {
+      const { cache_control: _, ...rest } = block;
+      return [rest as AnyBlock];
+    }
+    const rendered = renderBlock(block);
+    return rendered ? [{ type: "text", text: rendered }] : [];
+  });
+}
+
+/**
+ * The content to append to a live session that already holds the rest of the
+ * conversation. The CLI marks the newest message for the cache itself.
+ */
+export function continuationContent(message: AnthropicMessage): AnyBlock[] {
+  const content = asSent(message);
+  return content.length ? content : [{ type: "text", text: "Continue." }];
+}
+
+/**
+ * Identifies a conversation at a given point, so a later request can be matched
+ * to the live session that is already there. It covers everything a running
+ * session cannot change (passed in as `context`) and the history rendered the
+ * way the replay renders it, which leaves out thinking blocks, tool ids and
+ * cache markers that clients drop or move between requests.
+ */
+export function conversationKey(context: unknown, messages: AnthropicMessage[]): string {
+  const hash = createHash("sha256").update(JSON.stringify(context));
+  for (const message of messages) {
+    const rendered = renderMessage(message);
+    if (rendered) hash.update(`\n${JSON.stringify(String(rendered.text).trim())}`);
+  }
+  return hash.digest("hex");
 }
 
 /** Collect the tool_result blocks in the final user message, in order. */

@@ -113,19 +113,42 @@ settings from disk.
 | `GET` | `/v1/models` | The alias table, for model pickers. |
 | `GET` | `/health` | Unauthenticated. Reports live session count. |
 
+`output_config.effort` and `thinking` are passed on to the Agent SDK; without
+them the CLI runs at its own default effort with adaptive thinking. An `effort`
+pinned on a model alias wins over the client's.
+
 Known gaps: `max_tokens`, `temperature`, `top_p`, `top_k`, `stop_sequences` and
 `tool_choice` are accepted and ignored, because the Agent SDK does not expose
-them. Token counts come from the SDK's own accounting and are estimates.
+them.
 
-Conversation history is replayed to a new session as a transcript in the opening
-message, since a fresh Agent SDK session cannot have assistant turns injected
-into it. Once a tool call is outstanding the live session carries real context.
-The replay is append-only, one block per message with a cache breakpoint after
-the newest, so each new turn reads the earlier ones from the prompt cache rather
-than writing the whole conversation again. That only holds while the client's
-history is append-only too: a memory window that drops the oldest messages, or a
-system prompt that embeds the current time, starts the cache over on every turn.
-Each finished turn logs its `cache_read` and `cache_write` token counts.
+Usage is reported per response, as the API would: the input and cache figures
+of the model call that produced it, so they describe the current context size.
+Agents such as Hermes compress their history when that figure crosses a
+threshold. When a built-in tool makes the relay call the model several times
+in one response, output tokens are summed across those calls.
+
+A finished turn leaves its session open for the client's next one. When the
+next request is that same conversation (the history plus the answer just given,
+then a new user message, with the same model, system prompt, tools and
+reasoning controls), the new message is appended to the live session: nothing
+is replayed, and the prompt cache carries on as in a single long session.
+Thinking blocks and cache markers are ignored in that comparison, since clients
+drop or move them. Each such session is a CLI process of its own, about 220 MB,
+so only `RELAY_MAX_IDLE_SESSIONS` (default 4) are kept, for
+`RELAY_IDLE_TTL_MS` (default 10 minutes). Set the count to 0 to turn this off.
+
+Otherwise the history is replayed to a new session as a transcript in the
+opening message, since a fresh Agent SDK session cannot have assistant turns
+injected into it. That happens at the start of a conversation, after the idle
+session expired, and whenever the client rewrote its history: a memory window
+that drops the oldest messages, a compression pass, or a system prompt that
+embeds the current time.
+
+The relay sets no cache breakpoint of its own and drops the client's. The CLI
+already marks four blocks of every request, which is all the API allows.
+
+Each finished turn logs how it joined (`opened`, `resumed` after a tool result,
+or `continued`) with its `cache_read` and `cache_write` token counts.
 
 ## Testing
 

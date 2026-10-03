@@ -9,7 +9,7 @@
  */
 import { query, type Query } from "@anthropic-ai/claude-agent-sdk";
 import { childEnv, type Config, type ModelAlias } from "../config.ts";
-import type { OutBlock, Usage } from "./anthropic.ts";
+import type { Effort, OutBlock, Thinking, Usage } from "./anthropic.ts";
 import { buildToolBridge, type ToolBridge, type ToolCallResult } from "./bridge.ts";
 import { AsyncQueue } from "./queue.ts";
 import { emptyUsage, usageFromResult } from "./translate.ts";
@@ -55,7 +55,11 @@ class Turn {
   readonly content: OutBlock[] = [];
   /** Client tool calls announced so far, handed out once the model's message ends. */
   readonly calls: OutBlock[] = [];
-  private usage: Usage = emptyUsage();
+  /** Usage of the API calls made during this turn, read off the stream. */
+  private streamed: Usage | null = null;
+  private callOutput = 0;
+  /** The SDK's own figure, summed over its whole agent loop; only a fallback. */
+  private resultUsage: Usage = emptyUsage();
   private settled = false;
   private resolveFn!: (outcome: TurnOutcome) => void;
   private rejectFn!: (error: unknown) => void;
@@ -76,8 +80,40 @@ class Turn {
     this.content.push(block);
   }
 
-  setUsage(usage: Usage): void {
-    this.usage = usage;
+  /**
+   * An API call started. Its input buckets replace the previous call's, so they
+   * state the size of the context right now, which is what clients read them as.
+   */
+  callStarted(usage: Usage): void {
+    this.streamed = {
+      ...usage,
+      output_tokens: (this.streamed?.output_tokens ?? 0) + this.callOutput,
+    };
+    this.callOutput = 0;
+  }
+
+  /** The running output count of the current call; message_delta reports it cumulatively. */
+  callOutputSoFar(tokens: number): void {
+    this.callOutput = tokens;
+  }
+
+  setResultUsage(usage: Usage): void {
+    this.resultUsage = usage;
+  }
+
+  /**
+   * The SDK reports usage once per agent loop, summed over every model call in
+   * it, and a loop spans all the tool round trips of a client turn. Handing that
+   * sum to the client inflates its idea of the context size with every tool call,
+   * which pushes agents such as Hermes into needless context compression. The
+   * stream carries each call's own usage, so that is what the client gets.
+   */
+  private get usage(): Usage {
+    if (!this.streamed) return this.resultUsage;
+    return {
+      ...this.streamed,
+      output_tokens: this.streamed.output_tokens + this.callOutput,
+    };
   }
 
   finish(stop_reason: TurnOutcome["stop_reason"], extra: OutBlock[] = []): void {
@@ -106,6 +142,9 @@ export type SessionOptions = {
   alias: ModelAlias;
   systemPrompt?: string;
   tools: ToolBridge | null;
+  /** Reasoning controls; unset leaves the CLI's defaults. */
+  effort?: Effort;
+  thinking?: Thinking;
 };
 
 export class Session {
@@ -166,7 +205,7 @@ export class Session {
 
   /** Open the SDK query and send the first user message. */
   start(content: unknown[], onEvent?: (event: StreamEvent) => void): Promise<TurnOutcome> {
-    const { config, alias, systemPrompt, tools } = this.options;
+    const { config, alias, systemPrompt, tools, effort, thinking } = this.options;
     const turn = new Turn(onEvent);
     this.turn = turn;
 
@@ -174,7 +213,8 @@ export class Session {
       prompt: this.inbox[Symbol.asyncIterator]() as never,
       options: {
         model: alias.model,
-        effort: alias.effort,
+        effort,
+        thinking,
         systemPrompt,
         // A relay is not a coding agent: no project settings, no CLAUDE.md, no
         // skills, and no built-in tools unless the model alias asks for them.
@@ -201,12 +241,29 @@ export class Session {
     });
 
     void this.pump();
+    this.send(content);
+    return turn.done;
+  }
+
+  /**
+   * Carry on with a session whose last turn ended, by appending the client's new
+   * user message. The session still holds the whole conversation, so nothing is
+   * replayed and every earlier block stays in the prompt cache as it was.
+   */
+  continue(content: unknown[], onEvent?: (event: StreamEvent) => void): Promise<TurnOutcome> {
+    const turn = new Turn(onEvent);
+    this.turn = turn;
+    this.lastUsed = Date.now();
+    this.send(content);
+    return turn.done;
+  }
+
+  private send(content: unknown[]): void {
     this.inbox.push({
       type: "user",
       message: { role: "user", content },
       parent_tool_use_id: null,
     });
-    return turn.done;
   }
 
   /**
@@ -293,6 +350,16 @@ export class Session {
       if (turn.calls.length > 0) turn.finish("tool_use", turn.calls);
       return;
     }
+    if (event?.type === "message_start") {
+      const message = event.message as { usage?: unknown } | undefined;
+      turn.callStarted({ ...usageFromResult(message?.usage), output_tokens: 0 });
+      return;
+    }
+    if (event?.type === "message_delta") {
+      const usage = event.usage as { output_tokens?: unknown } | undefined;
+      if (typeof usage?.output_tokens === "number") turn.callOutputSoFar(usage.output_tokens);
+      return;
+    }
     if (event?.type !== "content_block_delta") return;
     const delta = event.delta as Record<string, unknown> | undefined;
     if (!delta) return;
@@ -346,7 +413,7 @@ export class Session {
   }
 
   private handleResult(turn: Turn, message: Record<string, unknown>): void {
-    turn.setUsage(usageFromResult(message.usage));
+    turn.setResultUsage(usageFromResult(message.usage));
     if (message.subtype !== "success") {
       const detail =
         typeof message.result === "string" && message.result
@@ -399,10 +466,16 @@ export class Session {
   }
 }
 
-/** Live sessions, indexed by the tool_use ids they are waiting on. */
+/**
+ * Live sessions, indexed by the tool_use ids they are waiting on, or, once a turn
+ * has ended, by the conversation they hold, so the client's next turn can carry
+ * on in the same session instead of replaying the history into a new one.
+ */
 export class SessionStore {
   private readonly sessions = new Set<Session>();
   private readonly byToolUseId = new Map<string, Session>();
+  /** Sessions between turns, by conversation key, oldest first. */
+  private readonly idle = new Map<string, Session>();
   private sweeper: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly config: Config) {}
@@ -422,29 +495,64 @@ export class SessionStore {
     this.ensureSweeper();
   }
 
-  /** Called after each turn: keep the session only while a tool call is open. */
-  settle(session: Session): void {
-    if (!session.hasParkedCalls) {
+  /** Take the session that holds the conversation up to `key`, if one is waiting. */
+  claimIdle(key: string): Session | undefined {
+    const session = this.idle.get(key);
+    if (session) this.idle.delete(key);
+    return session;
+  }
+
+  /**
+   * Called after each turn. A session with an open tool call waits for its
+   * result; one whose turn ended waits under `idleKey` for the next user turn,
+   * while there is room for it. Anything else is closed.
+   */
+  settle(session: Session, idleKey?: string): void {
+    this.unindex(session);
+    if (session.hasParkedCalls) {
+      for (const id of session.toolUseIds) this.byToolUseId.set(id, session);
+      return;
+    }
+    if (idleKey === undefined || this.config.maxIdleSessions <= 0) {
       session.close();
       return;
     }
-    for (const id of session.toolUseIds) this.byToolUseId.set(id, session);
+    this.idle.set(idleKey, session);
+    // Each one is a CLI process of its own, so only a few are kept around.
+    while (this.idle.size > this.config.maxIdleSessions) {
+      this.idle.values().next().value!.close();
+    }
+  }
+
+  private unindex(session: Session): void {
+    for (const [id, value] of this.byToolUseId) {
+      if (value === session) this.byToolUseId.delete(id);
+    }
+    for (const [key, value] of this.idle) {
+      if (value === session) this.idle.delete(key);
+    }
   }
 
   private forget(session: Session): void {
     this.sessions.delete(session);
-    for (const [id, value] of this.byToolUseId) {
-      if (value === session) this.byToolUseId.delete(id);
-    }
+    this.unindex(session);
     if (this.sessions.size === 0 && this.sweeper) {
       clearInterval(this.sweeper);
       this.sweeper = null;
     }
   }
 
+  private isIdle(session: Session): boolean {
+    return [...this.idle.values()].includes(session);
+  }
+
   private evictIfFull(): void {
     while (this.sessions.size >= this.config.maxSessions) {
-      const oldest = [...this.sessions].sort((a, b) => a.lastUsed - b.lastUsed)[0];
+      // A session between turns only saves a replay; one waiting on a tool
+      // result would lose the turn, so idle ones go first.
+      const oldest = [...this.sessions].sort(
+        (a, b) => Number(this.isIdle(b)) - Number(this.isIdle(a)) || a.lastUsed - b.lastUsed,
+      )[0];
       if (!oldest) return;
       oldest.close();
     }
@@ -453,9 +561,10 @@ export class SessionStore {
   private ensureSweeper(): void {
     if (this.sweeper) return;
     this.sweeper = setInterval(() => {
-      const cutoff = Date.now() - this.config.sessionTtlMs;
+      const now = Date.now();
       for (const session of [...this.sessions]) {
-        if (session.lastUsed < cutoff) session.close();
+        const ttl = this.isIdle(session) ? this.config.idleTtlMs : this.config.sessionTtlMs;
+        if (session.lastUsed < now - ttl) session.close();
       }
     }, 30_000);
     this.sweeper.unref?.();

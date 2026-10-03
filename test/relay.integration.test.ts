@@ -11,20 +11,36 @@ type Handler = (args: Record<string, unknown>) => Promise<unknown>;
 /** The options and tools the code under test handed to the fake SDK. */
 const sdk = {
   options: null as Record<string, any> | null,
+  /** How many SDK sessions were opened, and the user messages fed to the latest. */
+  queries: 0,
+  prompts: [] as Array<Record<string, any>>,
   handlers: new Map<string, Handler>(),
   stream: null as AsyncQueue<Record<string, unknown>> | null,
 };
 
-function resetSdk(): AsyncQueue<Record<string, unknown>> {
+type Feed = { push(message: Record<string, unknown>): void };
+
+/** Reset the fake SDK; what the test pushes goes to the session opened last. */
+function resetSdk(): Feed {
   sdk.options = null;
+  sdk.queries = 0;
+  sdk.prompts = [];
   sdk.handlers.clear();
   sdk.stream = new AsyncQueue<Record<string, unknown>>();
-  return sdk.stream;
+  return { push: (message) => sdk.stream!.push(message) };
 }
 
 mock.module("@anthropic-ai/claude-agent-sdk", () => ({
-  query: ({ options }: { options: Record<string, any> }) => {
+  query: ({ prompt, options }: { prompt: AsyncIterable<Record<string, any>>; options: Record<string, any> }) => {
     sdk.options = options;
+    // Each session reads its own stream, or an idle one would take the next one's messages.
+    if (sdk.queries > 0) sdk.stream = new AsyncQueue<Record<string, unknown>>();
+    sdk.queries += 1;
+    const prompts: Array<Record<string, any>> = [];
+    sdk.prompts = prompts;
+    void (async () => {
+      for await (const message of prompt) prompts.push(message);
+    })();
     const iterator = sdk.stream![Symbol.asyncIterator]();
     return {
       [Symbol.asyncIterator]: () => iterator,
@@ -66,6 +82,9 @@ const config: Config = {
   cwd: process.cwd(),
   logLevel: "error",
   cacheTtl: "1h",
+  idleTtlMs: 60_000,
+  // Off here, so a finished turn closes its session; the continuation tests turn it on.
+  maxIdleSessions: 0,
 };
 
 function post(body: unknown): Request {
@@ -86,6 +105,18 @@ const messageStop = {
   parent_tool_use_id: null,
   event: { type: "message_stop" },
 };
+
+function streamEvent(event: Record<string, unknown>): Record<string, unknown> {
+  return { type: "stream_event", parent_tool_use_id: null, event };
+}
+
+/** One model call's usage as the stream reports it: buckets up front, output at the end. */
+function callUsage(input: Record<string, number>, output: number): Record<string, unknown>[] {
+  return [
+    streamEvent({ type: "message_start", message: { usage: { ...input, output_tokens: 1 } } }),
+    streamEvent({ type: "message_delta", usage: { output_tokens: output } }),
+  ];
+}
 
 function result(text: string): Record<string, unknown> {
   return {
@@ -224,6 +255,116 @@ describe("POST /v1/messages", () => {
     expect(second.stop_reason).toBe("end_turn");
     expect(second.content[0].text).toContain("snowing");
     expect(store.size).toBe(0);
+  });
+
+  test("hands the client each turn's own usage, not the agent loop's running sum", async () => {
+    const stream = resetSdk();
+    const store = new SessionStore(config);
+    const messages = [{ role: "user" as const, content: "Weather in Graz?" }];
+
+    const firstPending = handleMessages(
+      post({ model: "claude-sonnet-5", tools: [weatherTool], messages }),
+      { config, store },
+    );
+    await Bun.sleep(5);
+    for (const event of callUsage({ input_tokens: 5, cache_read_input_tokens: 9000, cache_creation_input_tokens: 100 }, 40)) {
+      stream.push(event);
+    }
+    stream.push(
+      assistant([
+        { type: "tool_use", id: "toolu_usage", name: "mcp__relay__get_weather", input: { city: "Graz" } },
+      ]),
+    );
+    stream.push(messageStop);
+    const first = (await (await firstPending).json()) as Record<string, any>;
+    expect(first.usage).toEqual({
+      input_tokens: 5,
+      output_tokens: 40,
+      cache_read_input_tokens: 9000,
+      cache_creation_input_tokens: 100,
+    });
+
+    const secondPending = handleMessages(
+      post({
+        model: "claude-sonnet-5",
+        tools: [weatherTool],
+        messages: [
+          ...messages,
+          { role: "assistant", content: first.content },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_usage", content: "Snow" }] },
+        ],
+      }),
+      { config, store },
+    );
+    await Bun.sleep(5);
+    void sdk.handlers.get("get_weather")!({ city: "Graz" });
+    await Bun.sleep(5);
+    for (const event of callUsage({ input_tokens: 8, cache_read_input_tokens: 9100, cache_creation_input_tokens: 60 }, 12)) {
+      stream.push(event);
+    }
+    stream.push(assistant([{ type: "text", text: "Snowing." }]));
+    stream.push(streamEvent({ type: "message_stop" }));
+    // The SDK's result sums both calls; that is not this turn's context size.
+    stream.push({
+      ...result("Snowing."),
+      usage: { input_tokens: 13, output_tokens: 52, cache_read_input_tokens: 18100, cache_creation_input_tokens: 160 },
+    });
+
+    const second = (await (await secondPending).json()) as Record<string, any>;
+    expect(second.stop_reason).toBe("end_turn");
+    expect(second.usage).toEqual({
+      input_tokens: 8,
+      output_tokens: 12,
+      cache_read_input_tokens: 9100,
+      cache_creation_input_tokens: 60,
+    });
+  });
+
+  test("passes the client's effort and thinking to the SDK", async () => {
+    const stream = resetSdk();
+    const store = new SessionStore(config);
+    const pending = handleMessages(
+      post({
+        model: "claude-sonnet-5",
+        messages: [{ role: "user", content: "Hi" }],
+        output_config: { effort: "medium" },
+        thinking: { type: "enabled", budget_tokens: 2048 },
+      }),
+      { config, store },
+    );
+    await Bun.sleep(5);
+    stream.push(result("ok"));
+    await pending;
+
+    expect(sdk.options!.effort).toBe("medium");
+    expect(sdk.options!.thinking).toEqual({ type: "enabled", budgetTokens: 2048 });
+  });
+
+  test("lets an alias's pinned effort win and leaves unknown levels at the default", async () => {
+    const pinned: Config = {
+      ...config,
+      models: { cheap: { model: "claude-haiku-4-5", tools: [], effort: "low" } },
+    };
+    let stream = resetSdk();
+    let pending = handleMessages(
+      post({ model: "cheap", messages: [{ role: "user", content: "Hi" }], output_config: { effort: "max" } }),
+      { config: pinned, store: new SessionStore(pinned) },
+    );
+    await Bun.sleep(5);
+    stream.push(result("ok"));
+    await pending;
+    expect(sdk.options!.effort).toBe("low");
+
+    stream = resetSdk();
+    pending = handleMessages(
+      post({ model: "claude-sonnet-5", messages: [{ role: "user", content: "Hi" }], output_config: { effort: "minimal" } }),
+      { config, store: new SessionStore(config) },
+    );
+    await Bun.sleep(5);
+    stream.push(result("ok"));
+    await pending;
+    expect(sdk.options!.effort).toBeUndefined();
+    expect(sdk.options!.thinking).toBeUndefined();
   });
 
   test("resolves a tool call whose MCP invocation arrives before the announcement", async () => {
@@ -403,5 +544,119 @@ describe("POST /v1/messages", () => {
     const response = await handleMessages(post({ messages: [] }), { config, store });
     expect(response.status).toBe(400);
     expect(store.size).toBe(0);
+  });
+});
+
+describe("continuing a conversation in its live session", () => {
+  const keeping: Config = { ...config, maxIdleSessions: 2 };
+  const system = "You are terse.";
+  const opening = [{ role: "user" as const, content: "Capital of Austria?" }];
+
+  /** Finish the first turn of a conversation and return the assistant's reply. */
+  async function firstTurn(
+    store: InstanceType<typeof SessionStore>,
+    stream: Feed,
+    messages: unknown[] = opening,
+  ): Promise<Record<string, any>> {
+    const pending = handleMessages(post({ model: "claude-sonnet-5", system, messages }), { config: keeping, store });
+    await Bun.sleep(5);
+    stream.push(assistant([{ type: "thinking", thinking: "easy", signature: "sig" }, { type: "text", text: "Vienna." }]));
+    stream.push(result("Vienna."));
+    return (await (await pending).json()) as Record<string, any>;
+  }
+
+  test("appends the next user turn to the same session instead of replaying", async () => {
+    const stream = resetSdk();
+    const store = new SessionStore(keeping);
+    const first = await firstTurn(store, stream);
+    expect(store.size).toBe(1);
+
+    const pending = handleMessages(
+      post({
+        model: "claude-sonnet-5",
+        system,
+        messages: [
+          ...opening,
+          // Clients drop thinking and add cache markers; neither changes the conversation.
+          { role: "assistant", content: [{ type: "text", text: first.content[1].text, cache_control: { type: "ephemeral" } }] },
+          { role: "user", content: [{ type: "text", text: "Population?", cache_control: { type: "ephemeral" } }] },
+        ],
+      }),
+      { config: keeping, store },
+    );
+    await Bun.sleep(5);
+    stream.push(assistant([{ type: "text", text: "About two million." }]));
+    stream.push(result("About two million."));
+    const second = (await (await pending).json()) as Record<string, any>;
+
+    expect(second.content).toEqual([{ type: "text", text: "About two million." }]);
+    expect(sdk.queries).toBe(1);
+    expect(sdk.prompts).toHaveLength(2);
+    // Only the new message goes in, without the client's cache marker.
+    expect(sdk.prompts[1]!.message.content).toEqual([{ type: "text", text: "Population?" }]);
+    expect(store.size).toBe(1);
+    store.closeAll();
+  });
+
+  test("replays into a new session when the history no longer matches", async () => {
+    const stream = resetSdk();
+    const store = new SessionStore(keeping);
+    await firstTurn(store, stream);
+
+    const pending = handleMessages(
+      post({
+        model: "claude-sonnet-5",
+        system,
+        messages: [
+          ...opening,
+          { role: "assistant", content: "Vienna, obviously." },
+          { role: "user", content: "Population?" },
+        ],
+      }),
+      { config: keeping, store },
+    );
+    await Bun.sleep(5);
+    expect(sdk.queries).toBe(2);
+    expect(JSON.stringify(sdk.prompts[0]!.message.content)).toContain("Human: Capital of Austria?");
+    stream.push(result("ok"));
+    await pending;
+    store.closeAll();
+  });
+
+  test("does not continue when the system prompt changed", async () => {
+    const stream = resetSdk();
+    const store = new SessionStore(keeping);
+    const first = await firstTurn(store, stream);
+
+    const pending = handleMessages(
+      post({
+        model: "claude-sonnet-5",
+        system: "You are verbose.",
+        messages: [...opening, { role: "assistant", content: first.content }, { role: "user", content: "Population?" }],
+      }),
+      { config: keeping, store },
+    );
+    await Bun.sleep(5);
+    expect(sdk.queries).toBe(2);
+    stream.push(result("ok"));
+    await pending;
+    store.closeAll();
+  });
+
+  test("keeps only as many idle sessions as configured", async () => {
+    const one: Config = { ...keeping, maxIdleSessions: 1 };
+    const stream = resetSdk();
+    const store = new SessionStore(one);
+    for (const question of ["First?", "Second?"]) {
+      const pending = handleMessages(
+        post({ model: "claude-sonnet-5", messages: [{ role: "user", content: question }] }),
+        { config: one, store },
+      );
+      await Bun.sleep(5);
+      stream.push(result("ok"));
+      await pending;
+    }
+    expect(store.size).toBe(1);
+    store.closeAll();
   });
 });

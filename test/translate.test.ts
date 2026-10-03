@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { AnthropicMessage } from "../src/relay/anthropic.ts";
 import {
+  conversationKey,
   pendingToolResults,
   seedPrompt,
   toolResultText,
@@ -25,31 +26,23 @@ describe("seedPrompt", () => {
     ]);
   });
 
-  test("puts a single cache breakpoint on the current turn", () => {
-    const { content } = seedPrompt(conversation);
-    const marked = content.filter((block) => block.cache_control);
-    expect(marked).toEqual([content[content.length - 1]!]);
-  });
-
-  test("is append-only, so the next turn shares the previous one as a prefix", () => {
+  test("is append-only, so a later replay shares an earlier one as a prefix", () => {
     const next = seedPrompt([
       ...conversation,
       { role: "assistant", content: "About two million." },
       { role: "user", content: "Thanks" },
     ]).content;
     const previous = seedPrompt(conversation).content;
-    const strip = ({ cache_control: _, ...block }: Record<string, unknown>) => block;
-    expect(next.slice(0, previous.length).map(strip)).toEqual(previous.map(strip));
+    expect(next.slice(0, previous.length)).toEqual(previous);
   });
 
   test("sends a first turn as it came", () => {
     const { content } = seedPrompt([{ role: "user", content: "Hello" }]);
-    expect(content).toEqual([
-      { type: "text", text: "Hello", cache_control: { type: "ephemeral", ttl: "1h" } },
-    ]);
+    expect(content).toEqual([{ type: "text", text: "Hello" }]);
   });
 
-  test("drops cache breakpoints the client sent", () => {
+  test("carries no cache breakpoint, its own or the client's", () => {
+    // The CLI already spends the API's four breakpoints on every request.
     const { content } = seedPrompt([
       {
         role: "user",
@@ -59,8 +52,8 @@ describe("seedPrompt", () => {
         ],
       },
     ]);
-    expect(content.filter((block) => block.cache_control)).toHaveLength(1);
-    expect(content[1]!.cache_control).toBeDefined();
+    expect(content.filter((block) => block.cache_control)).toHaveLength(0);
+    expect(seedPrompt(conversation).content.filter((block) => block.cache_control)).toHaveLength(0);
   });
 
   test("preserves image blocks in the current turn", () => {
@@ -133,5 +126,21 @@ describe("toolResultText", () => {
     expect(toolResultText([{ type: "text", text: "a" }, { type: "text", text: "b" }])).toBe("a\nb");
     expect(toolResultText({ ok: true })).toBe('{"ok":true}');
     expect(toolResultText(undefined)).toBe("");
+  });
+});
+
+describe("conversationKey", () => {
+  test("ignores thinking blocks and cache markers", () => {
+    const withExtras: AnthropicMessage[] = [
+      { role: "user", content: [{ type: "text", text: "What is the capital of Austria?", cache_control: { type: "ephemeral" } } as never] },
+      { role: "assistant", content: [{ type: "thinking", thinking: "hm", signature: "s" }, { type: "text", text: "Vienna." }] },
+    ];
+    expect(conversationKey({ a: 1 }, withExtras)).toBe(conversationKey({ a: 1 }, conversation.slice(0, 2)));
+  });
+
+  test("changes with the context and with the history", () => {
+    const base = conversationKey({ a: 1 }, conversation);
+    expect(conversationKey({ a: 2 }, conversation)).not.toBe(base);
+    expect(conversationKey({ a: 1 }, conversation.slice(0, 2))).not.toBe(base);
   });
 });

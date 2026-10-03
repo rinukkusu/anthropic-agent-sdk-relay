@@ -19,13 +19,14 @@ export type Config = {
   defaultModel: string;
   sessionTtlMs: number;
   maxSessions: number;
+  /** How long a session whose turn ended waits for the client's next turn. */
+  idleTtlMs: number;
+  /** How many such sessions are kept; 0 replays the history on every turn. */
+  maxIdleSessions: number;
   toolTimeoutMs: number;
   cwd: string;
   logLevel: "debug" | "info" | "error";
-  /**
-   * Prompt cache TTL for the whole request. The CLI and the relay's own
-   * breakpoint must agree: the API rejects a 1h breakpoint after a 5m one.
-   */
+  /** Prompt cache TTL the CLI uses for every breakpoint it sets. */
   cacheTtl: "5m" | "1h";
 };
 
@@ -113,6 +114,8 @@ export function loadConfig(): Config {
     defaultModel,
     sessionTtlMs: num("RELAY_SESSION_TTL_MS", 10 * 60 * 1000),
     maxSessions: num("RELAY_MAX_SESSIONS", 32),
+    idleTtlMs: num("RELAY_IDLE_TTL_MS", 10 * 60 * 1000),
+    maxIdleSessions: num("RELAY_MAX_IDLE_SESSIONS", 4),
     toolTimeoutMs: num("RELAY_TOOL_TIMEOUT_MS", 15 * 60 * 1000),
     cwd: process.env.RELAY_CWD ?? process.cwd(),
     logLevel: (process.env.RELAY_LOG_LEVEL as Config["logLevel"]) ?? "info",
@@ -139,8 +142,8 @@ export function childEnv(config: Config): Record<string, string | undefined> {
     env[key] = value;
   }
   env.CLAUDE_AGENT_SDK_CLIENT_APP = "anthropic-agent-sdk-relay";
-  // Left to itself the CLI picks a TTL per account state, which need not match
-  // the breakpoint the relay puts in the prompt.
+  // Left to itself the CLI picks a TTL per account state; pin it, so cache
+  // behaviour does not change with the account.
   env.CLAUDE_CODE_PROMPT_CACHE_TTL = config.cacheTtl;
   env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL = config.cacheTtl;
   return env;

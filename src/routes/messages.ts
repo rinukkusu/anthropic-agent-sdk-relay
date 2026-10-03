@@ -3,6 +3,7 @@ import { resolveModel, type Config } from "../config.ts";
 import {
   errorResponse,
   messagesRequestSchema,
+  reasoningControls,
   systemToString,
   type MessagesResponse,
   type OutBlock,
@@ -16,7 +17,13 @@ import {
   type StreamEvent,
   type TurnOutcome,
 } from "../relay/session.ts";
-import { pendingToolResults, seedPrompt, toolResultText } from "../relay/translate.ts";
+import {
+  continuationContent,
+  conversationKey,
+  pendingToolResults,
+  seedPrompt,
+  toolResultText,
+} from "../relay/translate.ts";
 
 export type RouteContext = { config: Config; store: SessionStore };
 
@@ -24,14 +31,34 @@ function messageId(): string {
   return `msg_relay_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
 }
 
+/** How a request joined the relay's state; logged with each turn. */
+type JoinMode = "resumed" | "continued" | "opened";
+
+type PreparedTurn = {
+  session: Session;
+  mode: JoinMode;
+  /** What a live session cannot change, part of every conversation key. */
+  context: unknown;
+  run: (onEvent?: (e: StreamEvent) => void) => Promise<TurnOutcome>;
+};
+
 /**
  * Decide how this request joins the relay's state: resume the session waiting on
- * these tool results, or open a new one.
+ * these tool results, continue the one that holds the conversation so far, or
+ * open a new one and replay the history into it.
  */
 function prepareTurn(
   body: ReturnType<typeof messagesRequestSchema.parse>,
   ctx: RouteContext,
-): { session: Session; run: (onEvent?: (e: StreamEvent) => void) => Promise<TurnOutcome> } {
+): PreparedTurn {
+  const alias = resolveModel(ctx.config, body.model);
+  const declared = body.tools ?? [];
+  const systemPrompt = systemToString(body.system);
+  const controls = reasoningControls(body);
+  // An effort the alias pins is the operator's call and beats the client's.
+  const effort = alias.effort ?? controls.effort;
+  const context = { alias, systemPrompt, tools: declared, effort, thinking: controls.thinking };
+
   const results = pendingToolResults(body.messages);
   const existing = results.length
     ? ctx.store.find(results.map((result) => result.tool_use_id))
@@ -43,12 +70,19 @@ function prepareTurn(
       content: toolResultText(result.content),
       is_error: result.is_error,
     }));
-    return { session: existing, run: (onEvent) => existing.resume(payload, onEvent) };
+    return { session: existing, mode: "resumed", context, run: (onEvent) => existing.resume(payload, onEvent) };
   }
 
-  const alias = resolveModel(ctx.config, body.model);
+  const last = body.messages[body.messages.length - 1]!;
+  if (last.role === "user" && results.length === 0) {
+    const idle = ctx.store.claimIdle(conversationKey(context, body.messages.slice(0, -1)));
+    if (idle) {
+      const content = continuationContent(last);
+      return { session: idle, mode: "continued", context, run: (onEvent) => idle.continue(content, onEvent) };
+    }
+  }
+
   let session!: Session;
-  const declared = body.tools ?? [];
   const bridge = declared.length
     ? buildToolBridge(
         declared,
@@ -60,13 +94,32 @@ function prepareTurn(
   session = new Session({
     config: ctx.config,
     alias,
-    systemPrompt: systemToString(body.system),
+    systemPrompt,
     tools: bridge,
+    effort,
+    thinking: controls.thinking,
   });
   ctx.store.add(session);
 
-  const { content } = seedPrompt(body.messages, ctx.config.cacheTtl);
-  return { session, run: (onEvent) => session.start(content, onEvent) };
+  const { content } = seedPrompt(body.messages);
+  return { session, mode: "opened", context, run: (onEvent) => session.start(content, onEvent) };
+}
+
+/**
+ * Keep the session for what comes next. After a finished turn that is the
+ * client's next message, which will arrive on top of this history plus the
+ * answer just given.
+ */
+function settle(
+  ctx: RouteContext,
+  body: ReturnType<typeof messagesRequestSchema.parse>,
+  turn: PreparedTurn,
+  outcome: TurnOutcome,
+): void {
+  const idleKey = outcome.stop_reason === "end_turn"
+    ? conversationKey(turn.context, [...body.messages, { role: "assistant", content: outcome.content }])
+    : undefined;
+  ctx.store.settle(turn.session, idleKey);
 }
 
 /** Failed turns are logged at every level; the client may not show the error. */
@@ -75,11 +128,11 @@ function logFailure(model: string, error: RelayError): void {
 }
 
 /** One line per finished turn, so cache behaviour is visible in the logs. */
-function logTurn(ctx: RouteContext, model: string, outcome: TurnOutcome): void {
+function logTurn(ctx: RouteContext, model: string, mode: JoinMode, outcome: TurnOutcome): void {
   if (ctx.config.logLevel === "error") return;
   const u = outcome.usage;
   console.log(
-    `turn ${model} ${outcome.stop_reason}: input=${u.input_tokens} cache_read=${u.cache_read_input_tokens ?? 0} cache_write=${u.cache_creation_input_tokens ?? 0} output=${u.output_tokens}`,
+    `turn ${model} ${mode} ${outcome.stop_reason}: input=${u.input_tokens} cache_read=${u.cache_read_input_tokens ?? 0} cache_write=${u.cache_creation_input_tokens ?? 0} output=${u.output_tokens}`,
   );
 }
 
@@ -201,7 +254,7 @@ export async function handleMessages(request: Request, ctx: RouteContext): Promi
   }
 
   const model = body.model ?? ctx.config.defaultModel;
-  let turn: ReturnType<typeof prepareTurn>;
+  let turn: PreparedTurn;
   try {
     turn = prepareTurn(body, ctx);
   } catch (error) {
@@ -211,8 +264,8 @@ export async function handleMessages(request: Request, ctx: RouteContext): Promi
   if (!body.stream) {
     try {
       const outcome = await turn.run();
-      ctx.store.settle(turn.session);
-      logTurn(ctx, model, outcome);
+      settle(ctx, body, turn, outcome);
+      logTurn(ctx, model, turn.mode, outcome);
       return Response.json(toResponse(model, outcome));
     } catch (error) {
       turn.session.close();
@@ -230,8 +283,8 @@ export async function handleMessages(request: Request, ctx: RouteContext): Promi
         // Tool-use blocks are held back and written at the end, so the stream
         // carries the renamed client-facing tool rather than the MCP one.
         const outcome = await turn.run((event) => writer.delta(event));
-        ctx.store.settle(turn.session);
-        logTurn(ctx, model, outcome);
+        settle(ctx, body, turn, outcome);
+        logTurn(ctx, model, turn.mode, outcome);
         for (const block of outcome.content) {
           if (block.type === "tool_use") writer.toolUse(block);
         }
