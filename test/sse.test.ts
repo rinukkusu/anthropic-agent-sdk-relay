@@ -22,7 +22,7 @@ function capture(): { writer: SseWriter; frames: Frame[] } {
 describe("SseWriter", () => {
   test("emits a well-formed text stream", () => {
     const { writer, frames } = capture();
-    writer.start("msg_1", "claude-sonnet-5");
+    writer.start("msg_1", "claude-sonnet-5-5");
     writer.delta({ type: "text", text: "Hel" });
     writer.delta({ type: "text", text: "lo" });
     writer.finish("end_turn", { input_tokens: 10, output_tokens: 2 });
@@ -42,7 +42,7 @@ describe("SseWriter", () => {
 
   test("closes one block and opens the next when the kind changes", () => {
     const { writer, frames } = capture();
-    writer.start("msg_2", "claude-sonnet-5");
+    writer.start("msg_2", "claude-sonnet-5-5");
     writer.delta({ type: "thinking", text: "hmm" });
     writer.delta({ type: "text", text: "answer" });
     writer.finish("end_turn", { input_tokens: 0, output_tokens: 0 });
@@ -57,7 +57,7 @@ describe("SseWriter", () => {
 
   test("writes a tool call as start, one json delta and stop", () => {
     const { writer, frames } = capture();
-    writer.start("msg_3", "claude-sonnet-5");
+    writer.start("msg_3", "claude-sonnet-5-5");
     writer.delta({ type: "text", text: "Looking that up." });
     writer.toolUse({ type: "tool_use", id: "toolu_1", name: "get weather", input: { city: "Graz" } });
     writer.finish("tool_use", { input_tokens: 5, output_tokens: 5 });
@@ -81,7 +81,7 @@ describe("SseWriter", () => {
 
   test("reports errors as an error frame", () => {
     const { writer, frames } = capture();
-    writer.start("msg_4", "claude-sonnet-5");
+    writer.start("msg_4", "claude-sonnet-5-5");
     writer.error(Object.assign(new Error("nope"), { kind: "api_error", status: 502 }) as never);
     expect(frames.at(-1)!.event).toBe("error");
   });

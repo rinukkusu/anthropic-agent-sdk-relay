@@ -30,15 +30,16 @@ export type Config = {
 };
 
 const DEFAULT_MODELS: Record<string, ModelAlias> = {
-  "claude-opus-5": { model: "claude-opus-5", tools: [] },
-  "claude-sonnet-5": { model: "claude-sonnet-5", tools: [] },
+  "claude-opus-5-5": { model: "claude-opus-5-5", tools: [] },
+  "claude-sonnet-5-5": { model: "claude-sonnet-5-5", tools: [] },
+  "claude-fable-5-1": { model: "claude-fable-5-1", tools: [] },
   "claude-haiku-4-5": { model: "claude-haiku-4-5", tools: [] },
-  "claude-opus-5-web": {
-    model: "claude-opus-5",
+  "claude-opus-5-5-web": {
+    model: "claude-opus-5-5",
     tools: ["WebSearch", "WebFetch"],
   },
-  "claude-sonnet-5-web": {
-    model: "claude-sonnet-5",
+  "claude-sonnet-5-5-web": {
+    model: "claude-sonnet-5-5",
     tools: ["WebSearch", "WebFetch"],
   },
 };
@@ -103,7 +104,7 @@ export function loadConfig(): Config {
 
   const table = models();
   const defaultModel =
-    process.env.RELAY_DEFAULT_MODEL ?? Object.keys(table)[0] ?? "claude-sonnet-5";
+    process.env.RELAY_DEFAULT_MODEL ?? Object.keys(table)[0] ?? "claude-sonnet-5-5";
 
   return {
     port: num("PORT", 8787),
