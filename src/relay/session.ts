@@ -274,6 +274,20 @@ export class Session {
     results: Array<{ tool_use_id: string; content: string; is_error: boolean }>,
     onEvent?: (event: StreamEvent) => void,
   ): Promise<TurnOutcome> {
+    // The agent loop only goes on once every call of the batch has its result;
+    // resolving some would leave the CLI waiting on the rest for good.
+    const answered = new Set(results.map((result) => result.tool_use_id));
+    const missing = this.toolUseIds.filter((id) => !answered.has(id));
+    if (missing.length > 0) {
+      return Promise.reject(
+        new RelayError(
+          `tool_use ids were found without tool_result blocks: ${missing.join(", ")}`,
+          400,
+          "invalid_request_error",
+        ),
+      );
+    }
+
     const turn = new Turn(onEvent);
     this.turn = turn;
     this.lastUsed = Date.now();
@@ -456,6 +470,8 @@ export class Session {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    // Evicted or expired mid-turn: the waiting request gets an error, not silence.
+    this.turn?.fail(new RelayError("Session closed before the turn finished."));
     for (const call of this.parked.values()) {
       call.resolve?.({ content: [{ type: "text", text: "Session closed." }], isError: true });
     }
