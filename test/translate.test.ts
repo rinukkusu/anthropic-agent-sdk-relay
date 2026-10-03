@@ -115,6 +115,22 @@ describe("pendingToolResults", () => {
     ]);
   });
 
+  test("collects a parallel batch's results sent as one user message each", () => {
+    const results = pendingToolResults([
+      ...conversation,
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "toolu_a", name: "lookup_names", input: {} },
+          { type: "tool_use", id: "toolu_b", name: "search_documents", input: {} },
+        ],
+      },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_a", content: "none" }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_b", content: "[]" }] },
+    ]);
+    expect(results.map((result) => result.tool_use_id)).toEqual(["toolu_a", "toolu_b"]);
+  });
+
   test("returns nothing when the last message is a plain prompt", () => {
     expect(pendingToolResults(conversation)).toEqual([]);
   });

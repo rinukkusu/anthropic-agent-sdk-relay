@@ -146,13 +146,19 @@ export function conversationKey(context: unknown, messages: AnthropicMessage[]):
   return hash.digest("hex");
 }
 
-/** Collect the tool_result blocks in the final user message, in order. */
+/**
+ * Collect the tool_result blocks that follow the last assistant message, in order.
+ * Clients that run their own tool loop often send one user message per result of
+ * a parallel batch; the API merges consecutive user messages, so the relay must too.
+ */
 export function pendingToolResults(
   messages: AnthropicMessage[],
 ): Array<{ tool_use_id: string; content: unknown; is_error: boolean }> {
-  const last = messages[messages.length - 1];
-  if (!last || last.role !== "user") return [];
-  return blocksOf(last)
+  let start = messages.length;
+  while (start > 0 && messages[start - 1]!.role === "user") start -= 1;
+  return messages
+    .slice(start)
+    .flatMap(blocksOf)
     .filter((block) => block.type === "tool_result")
     .map((block) => ({
       tool_use_id: String(block.tool_use_id),

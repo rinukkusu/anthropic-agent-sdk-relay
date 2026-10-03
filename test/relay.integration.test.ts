@@ -473,6 +473,91 @@ describe("POST /v1/messages", () => {
     });
   });
 
+  /** Open a turn that ends on a parallel batch of `get weather` calls for Graz and Linz. */
+  async function parallelBatch() {
+    const stream = resetSdk();
+    const store = new SessionStore(config);
+    const messages = [{ role: "user" as const, content: "Weather in Graz and Linz?" }];
+    const pending = handleMessages(
+      post({ model: "claude-sonnet-5-5", tools: [weatherTool], messages }),
+      { config, store },
+    );
+    await Bun.sleep(5);
+    stream.push(
+      assistant([
+        { type: "tool_use", id: "toolu_1", name: "mcp__relay__get_weather", input: { city: "Graz" } },
+      ]),
+    );
+    const graz = sdk.handlers.get("get_weather")!({ city: "Graz" });
+    stream.push(
+      assistant([
+        { type: "tool_use", id: "toolu_2", name: "mcp__relay__get_weather", input: { city: "Linz" } },
+      ]),
+    );
+    stream.push(messageStop);
+    const first = (await (await pending).json()) as Record<string, any>;
+    const history = [...messages, { role: "assistant", content: first.content }];
+    return { store, history, graz };
+  }
+
+  test("resumes on a parallel batch's results sent as one user message each", async () => {
+    const { store, history, graz } = await parallelBatch();
+
+    void handleMessages(
+      post({
+        model: "claude-sonnet-5-5",
+        tools: [weatherTool],
+        messages: [
+          ...history,
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "Snow" }] },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_2", content: "Sun" }] },
+        ],
+      }),
+      { config, store },
+    );
+
+    expect(await graz).toEqual({ content: [{ type: "text", text: "Snow" }], isError: false });
+    expect(await sdk.handlers.get("get_weather")!({ city: "Linz" })).toEqual({
+      content: [{ type: "text", text: "Sun" }],
+      isError: false,
+    });
+  });
+
+  test("refuses results that leave part of a batch unanswered instead of hanging", async () => {
+    const { store, history } = await parallelBatch();
+
+    const response = await handleMessages(
+      post({
+        model: "claude-sonnet-5-5",
+        tools: [weatherTool],
+        messages: [
+          ...history,
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_2", content: "Sun" }] },
+        ],
+      }),
+      { config, store },
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as Record<string, any>;
+    expect(body.error.type).toBe("invalid_request_error");
+    expect(body.error.message).toContain("toolu_1");
+  });
+
+  test("fails the open turn when its session is closed", async () => {
+    resetSdk();
+    const store = new SessionStore(config);
+    const pending = handleMessages(
+      post({ model: "claude-sonnet-5-5", messages: [{ role: "user", content: "Hi" }] }),
+      { config, store },
+    );
+    await Bun.sleep(5);
+    store.closeAll();
+
+    const response = await pending;
+    expect(response.status).toBe(502);
+  });
+
   test("streams deltas and writes the tool call at the end", async () => {
     const stream = resetSdk();
     const store = new SessionStore(config);
