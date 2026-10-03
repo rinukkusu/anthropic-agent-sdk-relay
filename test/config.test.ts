@@ -67,8 +67,8 @@ describe("resolveModel", () => {
   ) as Config;
 
   test("resolves a known alias to its tools", () => {
-    expect(resolveModel(config, "claude-sonnet-5-web")).toEqual({
-      model: "claude-sonnet-5",
+    expect(resolveModel(config, "claude-sonnet-5-5-web")).toEqual({
+      model: "claude-sonnet-5-5",
       tools: ["WebSearch", "WebFetch"],
       effort: undefined,
     });

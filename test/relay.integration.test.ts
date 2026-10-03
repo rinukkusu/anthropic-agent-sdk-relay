@@ -74,8 +74,8 @@ const config: Config = {
   port: 0,
   host: "127.0.0.1",
   apiKey: null,
-  models: { "claude-sonnet-5": { model: "claude-sonnet-5", tools: [] } },
-  defaultModel: "claude-sonnet-5",
+  models: { "claude-sonnet-5-5": { model: "claude-sonnet-5-5", tools: [] } },
+  defaultModel: "claude-sonnet-5-5",
   sessionTtlMs: 60_000,
   maxSessions: 8,
   toolTimeoutMs: 60_000,
@@ -145,7 +145,7 @@ describe("POST /v1/messages", () => {
     const store = new SessionStore(config);
 
     const pending = handleMessages(
-      post({ model: "claude-sonnet-5", messages: [{ role: "user", content: "Hi" }] }),
+      post({ model: "claude-sonnet-5-5", messages: [{ role: "user", content: "Hi" }] }),
       { config, store },
     );
 
@@ -166,7 +166,7 @@ describe("POST /v1/messages", () => {
     const store = new SessionStore(config);
     const pending = handleMessages(
       post({
-        model: "claude-sonnet-5",
+        model: "claude-sonnet-5-5",
         system: "You are terse.",
         messages: [{ role: "user", content: "Hi" }],
       }),
@@ -192,7 +192,7 @@ describe("POST /v1/messages", () => {
     ];
 
     const firstPending = handleMessages(
-      post({ model: "claude-sonnet-5", tools: [weatherTool], messages }),
+      post({ model: "claude-sonnet-5-5", tools: [weatherTool], messages }),
       { config, store },
     );
 
@@ -225,7 +225,7 @@ describe("POST /v1/messages", () => {
 
     const secondPending = handleMessages(
       post({
-        model: "claude-sonnet-5",
+        model: "claude-sonnet-5-5",
         tools: [weatherTool],
         messages: [
           ...messages,
@@ -372,7 +372,7 @@ describe("POST /v1/messages", () => {
     const store = new SessionStore(config);
     const pending = handleMessages(
       post({
-        model: "claude-sonnet-5",
+        model: "claude-sonnet-5-5",
         tools: [weatherTool],
         messages: [{ role: "user", content: "Weather?" }],
       }),
@@ -395,7 +395,7 @@ describe("POST /v1/messages", () => {
 
     void handleMessages(
       post({
-        model: "claude-sonnet-5",
+        model: "claude-sonnet-5-5",
         tools: [weatherTool],
         messages: [
           { role: "user", content: "Weather?" },
@@ -420,7 +420,7 @@ describe("POST /v1/messages", () => {
     const store = new SessionStore(config);
     const messages = [{ role: "user" as const, content: "Weather in Graz and Linz?" }];
     const pending = handleMessages(
-      post({ model: "claude-sonnet-5", tools: [weatherTool], messages }),
+      post({ model: "claude-sonnet-5-5", tools: [weatherTool], messages }),
       { config, store },
     );
 
@@ -447,7 +447,7 @@ describe("POST /v1/messages", () => {
 
     void handleMessages(
       post({
-        model: "claude-sonnet-5",
+        model: "claude-sonnet-5-5",
         tools: [weatherTool],
         messages: [
           ...messages,
@@ -478,7 +478,7 @@ describe("POST /v1/messages", () => {
     const store = new SessionStore(config);
     const pending = handleMessages(
       post({
-        model: "claude-sonnet-5",
+        model: "claude-sonnet-5-5",
         stream: true,
         tools: [weatherTool],
         messages: [{ role: "user", content: "Weather in Graz?" }],
@@ -519,7 +519,7 @@ describe("POST /v1/messages", () => {
     const stream = resetSdk();
     const store = new SessionStore(config);
     const pending = handleMessages(
-      post({ model: "claude-sonnet-5", messages: [{ role: "user", content: "Hi" }] }),
+      post({ model: "claude-sonnet-5-5", messages: [{ role: "user", content: "Hi" }] }),
       { config, store },
     );
 

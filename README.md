@@ -50,7 +50,7 @@ docker run --rm -p 8787:8787 --env-file .env ghcr.io/rinukkusu/anthropic-agent-s
 ```
 
 ```bash
-curl http://127.0.0.1:8787/v1/messages -H "x-api-key: $RELAY_API_KEY" -H 'content-type: application/json' -d '{"model":"claude-sonnet-5","max_tokens":256,"messages":[{"role":"user","content":"pong?"}]}'
+curl http://127.0.0.1:8787/v1/messages -H "x-api-key: $RELAY_API_KEY" -H 'content-type: application/json' -d '{"model":"claude-sonnet-5-5","max_tokens":256,"messages":[{"role":"user","content":"pong?"}]}'
 ```
 
 ## Authentication
@@ -85,11 +85,12 @@ Agent SDK with no tools, so you can ask for a model the relay has never heard of
 
 | Alias | Model | Built-in tools |
 | --- | --- | --- |
-| `claude-opus-5` | `claude-opus-5` | none |
-| `claude-sonnet-5` | `claude-sonnet-5` | none |
+| `claude-opus-5-5` | `claude-opus-5-5` | none |
+| `claude-sonnet-5-5` | `claude-sonnet-5-5` | none |
+| `claude-fable-5-1` | `claude-fable-5-1` | none |
 | `claude-haiku-4-5` | `claude-haiku-4-5` | none |
-| `claude-opus-5-web` | `claude-opus-5` | `WebSearch`, `WebFetch` |
-| `claude-sonnet-5-web` | `claude-sonnet-5` | `WebSearch`, `WebFetch` |
+| `claude-opus-5-5-web` | `claude-opus-5-5` | `WebSearch`, `WebFetch` |
+| `claude-sonnet-5-5-web` | `claude-sonnet-5-5` | `WebSearch`, `WebFetch` |
 
 Replace the table with `RELAY_MODELS`. By default a relayed model is a plain
 chat model: no filesystem, no shell, no project `CLAUDE.md`, no skills, and no

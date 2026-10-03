@@ -9,7 +9,7 @@
  */
 const base = process.env.RELAY_URL ?? "http://127.0.0.1:8787";
 const apiKey = process.env.RELAY_API_KEY ?? "";
-const model = process.env.RELAY_SMOKE_MODEL ?? "claude-sonnet-5";
+const model = process.env.RELAY_SMOKE_MODEL ?? "claude-sonnet-5-5";
 
 function headers(): Record<string, string> {
   return {
