@@ -16,7 +16,9 @@ import { emptyUsage, usageFromResult } from "./translate.ts";
 
 export type StreamEvent =
   | { type: "text"; text: string }
-  | { type: "thinking"; text: string };
+  | { type: "thinking"; text: string }
+  /** A built-in tool the SDK is about to run, e.g. a web search; only for progress display. */
+  | { type: "tool"; name: string; input: Record<string, unknown> };
 
 export type TurnOutcome = {
   stop_reason: "end_turn" | "tool_use" | "max_tokens";
@@ -407,8 +409,12 @@ export class Session {
       } else if (raw.type === "tool_use") {
         const clientName = bridge?.toClientName(String(raw.name));
         // A built-in tool the alias enabled: the SDK runs it, the client never
-        // sees it, and the turn keeps going.
-        if (!clientName) continue;
+        // sees it as a tool call, and the turn keeps going. A stream that asked
+        // for progress gets told about it.
+        if (!clientName) {
+          turn.emit({ type: "tool", name: String(raw.name), input: (raw.input ?? {}) as Record<string, unknown> });
+          continue;
+        }
         const id = String(raw.id);
         const input = (raw.input ?? {}) as Record<string, unknown>;
         this.park({ id, clientName, input });

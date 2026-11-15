@@ -114,6 +114,18 @@ settings from disk.
 | `GET` | `/v1/models` | The alias table, for model pickers. |
 | `GET` | `/health` | Unauthenticated. Reports live session count. |
 
+A streaming request with the header `x-relay-progress: 1` also gets an event
+for every built-in tool the agent runs (`WebSearch`, `WebFetch`), before it
+runs, so a client can show what the agent is doing:
+
+```
+event: relay_tool
+data: {"type":"relay_tool","name":"WebSearch","input":{"query":"..."}}
+```
+
+It is not an Anthropic event type; SDK clients skip it, and without the header
+the stream has none.
+
 `output_config.effort` and `thinking` are passed on to the Agent SDK; without
 them the CLI runs at its own default effort with adaptive thinking. An `effort`
 pinned on a model alias wins over the client's.

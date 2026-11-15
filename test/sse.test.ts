@@ -3,7 +3,7 @@ import { SseWriter } from "../src/routes/messages.ts";
 
 type Frame = { event: string; data: Record<string, unknown> };
 
-function capture(): { writer: SseWriter; frames: Frame[] } {
+function capture(progress = false): { writer: SseWriter; frames: Frame[] } {
   const frames: Frame[] = [];
   const decoder = new TextDecoder();
   const controller = {
@@ -16,10 +16,32 @@ function capture(): { writer: SseWriter; frames: Frame[] } {
       });
     },
   } as unknown as ReadableStreamDefaultController<Uint8Array>;
-  return { writer: new SseWriter(controller), frames };
+  return { writer: new SseWriter(controller, progress), frames };
 }
 
 describe("SseWriter", () => {
+  test("leaves built-in tool progress out unless asked for", () => {
+    const { writer, frames } = capture();
+    writer.start("msg_p", "claude-opus-5-5-web");
+    writer.delta({ type: "tool", name: "WebSearch", input: { query: "x" } });
+    writer.delta({ type: "text", text: "a" });
+    writer.finish("end_turn", { input_tokens: 0, output_tokens: 0 });
+    expect(frames.some((f) => f.event === "relay_tool")).toBe(false);
+    expect(frames[1]!.event).toBe("content_block_start");
+  });
+
+  test("writes built-in tool progress between blocks without touching their indexes", () => {
+    const { writer, frames } = capture(true);
+    writer.start("msg_q", "claude-opus-5-5-web");
+    writer.delta({ type: "text", text: "Moment" });
+    writer.delta({ type: "tool", name: "WebSearch", input: { query: "Gemeinde" } });
+    writer.delta({ type: "text", text: " gefunden" });
+    writer.finish("end_turn", { input_tokens: 0, output_tokens: 0 });
+    const tool = frames.find((f) => f.event === "relay_tool")!;
+    expect(tool.data).toEqual({ type: "relay_tool", name: "WebSearch", input: { query: "Gemeinde" } });
+    expect(frames.filter((f) => f.event === "content_block_start")).toHaveLength(1);
+  });
+
   test("emits a well-formed text stream", () => {
     const { writer, frames } = capture();
     writer.start("msg_1", "claude-sonnet-5-5");

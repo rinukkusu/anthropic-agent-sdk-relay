@@ -156,6 +156,8 @@ export class SseWriter {
 
   constructor(
     private readonly controller: ReadableStreamDefaultController<Uint8Array>,
+    /** Write `relay_tool` events for built-in tools (requested with the `x-relay-progress` header). */
+    private readonly progress = false,
     private readonly encoder = new TextEncoder(),
   ) {}
 
@@ -182,6 +184,12 @@ export class SseWriter {
   }
 
   delta(event: StreamEvent): void {
+    if (event.type === "tool") {
+      // Not an Anthropic event: SDK clients skip event types they don't know,
+      // and only clients that asked for it get one.
+      if (this.progress) this.send("relay_tool", { type: "relay_tool", name: event.name, input: event.input });
+      return;
+    }
     if (this.open !== event.type) {
       this.closeBlock();
       this.send("content_block_start", {
@@ -277,7 +285,7 @@ export async function handleMessages(request: Request, ctx: RouteContext): Promi
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const writer = new SseWriter(controller);
+      const writer = new SseWriter(controller, request.headers.get("x-relay-progress") === "1");
       writer.start(messageId(), model);
       try {
         // Tool-use blocks are held back and written at the end, so the stream
